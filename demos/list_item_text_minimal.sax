@@ -1,0 +1,15 @@
+<Component name="App">
+  <ListItemText primary="Main inbox" secondary="Two unread messages">Multiline list text</ListItemText>
+</Component>
+<Component name="ListItemText">
+  <state>
+    primary = alloc 256
+    primary_len = 0
+    secondary = alloc 256
+    secondary_len = 0
+  </state>
+  <div>
+    <Slot />
+  </div>
+  !primary !primary_len !secondary !secondary_len
+</Component>

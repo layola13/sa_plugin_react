@@ -1,0 +1,142 @@
+<Component name="App">
+  <state>
+    count = 0
+    idle_score = 9
+    small_score = 3 as i32
+    fallback_small_score = 2 as i32
+    ratio = 0.75 as f64
+    fallback_ratio = 0.5 as f64
+    active = 0 as i1
+    fallback_active = 0 as i1
+    object_title = alloc 64
+    object_title_len = 0
+    object_extra = alloc 128
+    object_extra_len = 0
+    object_branch = alloc 128
+    object_branch_len = 0
+    nested_extra = alloc 128
+    nested_extra_len = 0
+    object_empty = alloc 8
+    object_empty_len = 0
+    status_fallback = alloc 64
+    status_fallback_len = 0
+    layout_ref_seen = 0
+    button_ref = 0
+    button_ref_seen = 0
+  </state>
+
+  <Layout ref={capture_layout} title="Composition">
+    <>
+      <section class="counter-panel">
+        <h1>Composition Demo</h1>
+        <p>Projected count: {count}</p>
+        <p>Layout ref seen: {layout_ref_seen}</p>
+        <p>Button ref seen: {button_ref_seen}</p>
+        <CounterBadge count="{count}" />
+        <InlineShell>Direct projected count: {count}</InlineShell>
+        <ObjectBadge config={{ ...object_extra, ["title"]: object_title, [object_title]: count, [count + 1]: active, [active]: count, [active ? active : fallback_active]: idle_score, [active ? fallback_active : true]: count, [active ? status_fallback : null]: count, [active ? small_score : fallback_small_score]: active, [active ? small_score : 4]: active, [active ? ratio : fallback_ratio]: count, [active ? ratio : 0.25]: count, [((count + 2) * 3) - 1]: count, [active ? "enabled" : "disabled"]: count, [active ? object_title : status_fallback]: count, [active ? "ready" : status_fallback]: count, [active ? count : idle_score]: active, [active ? count : 0]: count, ...(active ? object_branch : { idle_branch: true }), ...(active ? { active_null_branch: true } : null), ...(active ? nested_extra : null), ...(active ? nested_extra : object_branch), ...(active && { active_and_branch: true }), ...(!active && { idle_and_branch: true }), ...(active && object_branch), ...(!active && object_branch), ...(active || { idle_or_branch: true }), ...(!active || { active_or_branch: true }), ...(active || nested_extra), ...(!active || nested_extra), status: active ? object_title : status_fallback, label: active ? "ready" : status_fallback, nullable: active ? object_title : null, score: active ? count : idle_score, bonus: active ? count : 0, rating: active ? small_score : fallback_small_score, rating_floor: active ? small_score : 4, visible: active ? active : fallback_active, pinned: active ? true : fallback_active, precision: active ? ratio : fallback_ratio, precision_floor: active ? ratio : 0.25, ...{ [active ? "spread_ready" : "spread_idle"]: count, [count + 100]: active, [active]: count, spread: "static", spread_count: count }, count: count, active: active, tags: ["alpha", object_title, count, active], variants: [active ? object_title : status_fallback, active ? count : idle_score, active ? count : 0, active ? small_score : fallback_small_score, active ? small_score : 4, active ? active : fallback_active, active ? false : true, active ? null : status_fallback, active ? ratio : fallback_ratio, active ? ratio : 0.25, active ? "ready" : status_fallback], computed_items: [{ size: 1, [active ? "item_ready" : "item_idle"]: count, [active ? count : idle_score]: active, [active ? object_title : status_fallback]: count, current: count }], leading_computed_items: [{ [active ? "leading_item_ready" : "leading_item_idle"]: count, [active ? count : idle_score]: active, [active ? object_title : status_fallback]: count, current: count }], items: [{ size: 1, ...nested_extra, ["current"]: count, ...(!active && { idle_item: true }), ...(active && { active_item: true }), ...(active ? { active_item_branch: true } : null), ...(active || { idle_item_or: true }), ...(!active || { active_item_or: true }), ...(active || object_branch), ...(!active || object_branch), ...{ [active ? "nested_spread_ready" : "nested_spread_idle"]: count, [count + 200]: active, [active]: count, enabled: true, spread_active: active } }], and_ptr_items: [{ size: 1, ...(active && object_branch), ...(!active && object_branch), current: count }], leading_items: [{ ...nested_extra, ["current"]: count, ...{ enabled: true, spread_active: active } }], leading_static_spread_items: [{ ...{ [active ? "leading_spread_ready" : "leading_spread_idle"]: count, [count + 300]: active, [active]: count, enabled: true, spread_active: active }, current: count }], leading_conditional_items: [{ ...(!active && { idle_leading_item: true }), current: count }], leading_active_items: [{ ...(active && { active_leading_item: true }), current: count }], leading_ptr_and_items: [{ ...(active && nested_extra), current: count }], leading_negated_ptr_and_items: [{ ...(!active && nested_extra), current: count }], leading_null_items: [{ ...(active ? { active_leading_branch: true } : null), current: count }], leading_ptr_null_items: [{ ...(active ? nested_extra : null), current: count }], leading_ptr_fallback_items: [{ ...(active ? nested_extra : { idle_ptr_fallback: true }), current: count }], leading_ptr_branch_items: [{ ...(active ? nested_extra : object_branch), current: count }], leading_or_items: [{ ...(active || { idle_leading_or: true }), current: count }], leading_ptr_or_items: [{ ...(active || nested_extra), current: count }], leading_negated_or_items: [{ ...(!active || { active_leading_or: true }), current: count }], leading_negated_ptr_or_items: [{ ...(!active || nested_extra), current: count }], leading_static_spread_nested: { ...{ [active ? "leading_nested_spread_ready" : "leading_nested_spread_idle"]: count, [count + 400]: active, [active]: count, enabled: true, spread_active: active }, current: count }, ternary_static_spread_items: [{ ...{ [active ? active : fallback_active]: idle_score, [active ? fallback_active : true]: count, [active ? false : true]: count, current: count } }], leading_nested: { [active ? "leading_nested_ready" : "leading_nested_idle"]: count, [active ? count : idle_score]: active, [active ? object_title : status_fallback]: count, current: count }, nested: { size: 2, ...(active ? nested_extra : { idle_nested_branch: true }), ...(active ? nested_extra : object_branch), ...(active ? nested_extra : null), ...nested_extra, ...(active ? { active_nested_branch: true } : null), ...(active && { active_nested_and: true }), ...(!active && { idle_nested_and: true }), ...(active || { idle_nested_or: true }), ...(!active || { active_nested_or: true }), ...(active && object_branch), ...(!active && object_branch), ...(active || object_branch), ...(!active || object_branch), [active ? "nested_ready" : "nested_idle"]: count, [active ? count : idle_score]: active, [active ? object_title : status_fallback]: count, ["current"]: count, ...{ [active ? "nested_spread_ready" : "nested_spread_idle"]: count, [count + 200]: active, [active]: count, enabled: true, spread_active: active } } }} />
+        <input className="extra-json" value={object_extra} onChange={set_extra} />
+        <input className="branch-json" value={object_branch} onChange={set_branch} />
+        <input className="status-fallback" value={status_fallback} onChange={set_status_fallback} />
+        <input className="nested-json" value={nested_extra} onChange={set_nested_extra} />
+        <button ref={capture_button} className="action" onClick={inc}>Increment projected count</button>
+      </section>
+    </>
+  </Layout>
+
+  @capture_layout:
+  L_ENTRY:
+    store state+App_layout_ref_seen, 1 as i64
+    ret
+
+  @capture_button:
+  L_ENTRY:
+    store state+App_button_ref, ref_value as i64
+    store state+App_button_ref_seen, 1 as i64
+    ret
+
+  @inc:
+  L_ENTRY:
+    count = load state+App_count as i64
+    count = add count, 1
+    store state+App_count, count as i64
+    store state+App_active, 1 as i1
+    object_title = load state+App_object_title as ptr
+    object_title_len = call @sax_event_type(*object_title, 64)
+    store state+App_object_title_len, object_title_len as i64
+    call @render()
+    ret
+
+  @set_extra:
+  L_ENTRY:
+    object_extra = load state+App_object_extra as ptr
+    object_extra_len = call @sax_event_target_value(*object_extra, 128)
+    store state+App_object_extra_len, object_extra_len as i64
+    call @render()
+    ret
+
+  @set_branch:
+  L_ENTRY:
+    object_branch = load state+App_object_branch as ptr
+    object_branch_len = call @sax_event_target_value(*object_branch, 128)
+    store state+App_object_branch_len, object_branch_len as i64
+    call @render()
+    ret
+
+  @set_status_fallback:
+  L_ENTRY:
+    status_fallback = load state+App_status_fallback as ptr
+    status_fallback_len = call @sax_event_target_value(*status_fallback, 64)
+    store state+App_status_fallback_len, status_fallback_len as i64
+    call @render()
+    ret
+
+  @set_nested_extra:
+  L_ENTRY:
+    nested_extra = load state+App_nested_extra as ptr
+    nested_extra_len = call @sax_event_target_value(*nested_extra, 128)
+    store state+App_nested_extra_len, nested_extra_len as i64
+    call @render()
+    ret
+
+  !count !idle_score !small_score !fallback_small_score !ratio !fallback_ratio !active !fallback_active !object_title !object_title_len !object_extra !object_extra_len !object_branch !object_branch_len !nested_extra !nested_extra_len !object_empty !object_empty_len !status_fallback !status_fallback_len !layout_ref_seen !button_ref !button_ref_seen
+</Component>
+
+<Component name="Layout">
+  <state>
+    title = alloc 64
+    title_len = 0
+  </state>
+
+  <article class="layout-shell" style={{ display: "grid", gap: "12px", padding: "16px" }}>
+    <header class="layout-header">React-style Layout: {title}</header>
+    <Slot />
+  </article>
+
+  !title !title_len
+</Component>
+
+<Component name="CounterBadge">
+  <state>
+    count = 0
+  </state>
+
+  <aside class="counter-badge">Badge count: {count}</aside>
+
+  !count
+</Component>
+
+<Component name="InlineShell">
+  <span class="inline-shell"><Slot /></span>
+</Component>
+
+<Component name="ObjectBadge">
+  <state>
+    config = alloc 4096
+    config_len = 0
+  </state>
+
+  <pre class="object-prop">Object config: {config}</pre>
+
+  !config !config_len
+</Component>

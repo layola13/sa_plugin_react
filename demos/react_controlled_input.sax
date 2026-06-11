@@ -1,0 +1,148 @@
+<Component name="ControlledInput">
+  <state>
+    text = alloc 64
+    text_len = 0
+    current_value = alloc 64
+    current_value_len = 0
+    version = 1
+    enabled = 0 as i1
+    current_checked = 0 as i1
+    submits = 0
+    event_type = alloc 16
+    event_type_len = 0
+    input_target = 0
+    input_target_name = alloc 32
+    input_target_name_len = 0
+    input_target_id = alloc 32
+    input_target_id_len = 0
+    submit_target = 0
+    submit_target_name = alloc 32
+    submit_target_name_len = 0
+    submit_target_id = alloc 32
+    submit_target_id_len = 0
+    default_prevented = 0 as i1
+    event_time_stamp = 0
+    event_button = 0
+    event_client_x = 0
+    event_client_y = 0
+    event_page_x = 0
+    event_page_y = 0
+    event_screen_x = 0
+    event_screen_y = 0
+    event_modifiers = 0
+  </state>
+
+  <form id="controlled-form" name="controlled" class="controlled-input" onSubmit={submit}>
+    <h1>Controlled input</h1>
+    <input id="message-input" name="message" className="field" value={text} onChange={sync} placeholder="Type here" />
+    <p>Echo: {text}</p>
+    <p>Current value: {current_value}</p>
+    <label className="toggle">
+      <input type="checkbox" checked={enabled} onChange={toggle} />
+      Enable advanced mode
+    </label>
+    <p>Enabled: {enabled}</p>
+    <p>Current checked: {current_checked}</p>
+    <button type="submit">Submit</button>
+    <p>Submits: {submits}</p>
+    <p>Event: {event_type}</p>
+    <p>Input target: {input_target}</p>
+    <p>Input target name: {input_target_name}</p>
+    <p>Input target id: {input_target_id}</p>
+    <p>Submit target: {submit_target}</p>
+    <p>Submit target name: {submit_target_name}</p>
+    <p>Submit target id: {submit_target_id}</p>
+    <p>Default prevented: {default_prevented}</p>
+    <p>Time stamp: {event_time_stamp}</p>
+    <p>Button: {event_button}</p>
+    <p>Client: {event_client_x},{event_client_y}</p>
+    <p>Page: {event_page_x},{event_page_y}</p>
+    <p>Screen: {event_screen_x},{event_screen_y}</p>
+    <p>Modifiers: {event_modifiers}</p>
+    <p>Version: {version}</p>
+  </form>
+
+  @sync:
+  L_ENTRY:
+    text = load state+ControlledInput_text as ptr
+    len = call @sax_event_target_value(*text, 64)
+    store state+ControlledInput_text_len, len as i64
+    current_value = load state+ControlledInput_current_value as ptr
+    current_value_len = call @sax_event_current_target_value(*current_value, 64)
+    store state+ControlledInput_current_value_len, current_value_len as i64
+    input_target = call @sax_event_target()
+    store state+ControlledInput_input_target, input_target as i64
+    input_target_name = load state+ControlledInput_input_target_name as ptr
+    input_target_name_len = call @sax_event_target_name(*input_target_name, 32)
+    store state+ControlledInput_input_target_name_len, input_target_name_len as i64
+    input_target_id = load state+ControlledInput_input_target_id as ptr
+    input_target_id_len = call @sax_event_target_id(*input_target_id, 32)
+    store state+ControlledInput_input_target_id_len, input_target_id_len as i64
+    call @render()
+    ret
+
+  @toggle:
+  L_ENTRY:
+    checked = call @sax_event_target_checked()
+    store state+ControlledInput_enabled, checked as i1
+    current_checked = call @sax_event_current_target_checked()
+    store state+ControlledInput_current_checked, current_checked as i1
+    call @render()
+    ret
+
+  @submit:
+  L_ENTRY:
+    call @sax_event_prevent_default()
+    call @sax_event_stop_propagation()
+    event_type = load state+ControlledInput_event_type as ptr
+    event_type_len = call @sax_event_type(*event_type, 16)
+    store state+ControlledInput_event_type_len, event_type_len as i64
+    submit_target = call @sax_event_current_target()
+    store state+ControlledInput_submit_target, submit_target as i64
+    submit_target_name = load state+ControlledInput_submit_target_name as ptr
+    submit_target_name_len = call @sax_event_current_target_name(*submit_target_name, 32)
+    store state+ControlledInput_submit_target_name_len, submit_target_name_len as i64
+    submit_target_id = load state+ControlledInput_submit_target_id as ptr
+    submit_target_id_len = call @sax_event_current_target_id(*submit_target_id, 32)
+    store state+ControlledInput_submit_target_id_len, submit_target_id_len as i64
+    default_prevented = call @sax_event_default_prevented()
+    store state+ControlledInput_default_prevented, default_prevented as i1
+    event_time_stamp = call @sax_event_time_stamp()
+    store state+ControlledInput_event_time_stamp, event_time_stamp as i64
+    event_button = call @sax_event_button()
+    store state+ControlledInput_event_button, event_button as i64
+    event_client_x = call @sax_event_client_x()
+    store state+ControlledInput_event_client_x, event_client_x as i64
+    event_client_y = call @sax_event_client_y()
+    store state+ControlledInput_event_client_y, event_client_y as i64
+    event_page_x = call @sax_event_page_x()
+    store state+ControlledInput_event_page_x, event_page_x as i64
+    event_page_y = call @sax_event_page_y()
+    store state+ControlledInput_event_page_y, event_page_y as i64
+    event_screen_x = call @sax_event_screen_x()
+    store state+ControlledInput_event_screen_x, event_screen_x as i64
+    event_screen_y = call @sax_event_screen_y()
+    store state+ControlledInput_event_screen_y, event_screen_y as i64
+    shift = call @sax_event_shift_key()
+    shift_wide = zext shift as i64
+    ctrl = call @sax_event_ctrl_key()
+    ctrl_wide = zext ctrl as i64
+    ctrl_wide = mul ctrl_wide, 2
+    alt = call @sax_event_alt_key()
+    alt_wide = zext alt as i64
+    alt_wide = mul alt_wide, 4
+    meta = call @sax_event_meta_key()
+    meta_wide = zext meta as i64
+    meta_wide = mul meta_wide, 8
+    event_modifiers = add shift_wide, ctrl_wide
+    event_modifiers = add event_modifiers, alt_wide
+    event_modifiers = add event_modifiers, meta_wide
+    store state+ControlledInput_event_modifiers, event_modifiers as i64
+    submits = load state+ControlledInput_submits as i64
+    submits = add submits, 1
+    store state+ControlledInput_submits, submits as i64
+    call @render()
+    ret
+
+  !text !text_len !current_value !current_value_len !version !enabled !current_checked !submits !event_type !event_type_len !input_target !input_target_name !input_target_name_len !input_target_id !input_target_id_len !submit_target !submit_target_name !submit_target_name_len !submit_target_id !submit_target_id_len !default_prevented !event_time_stamp !event_button !event_client_x !event_client_y !event_page_x !event_page_y !event_screen_x !event_screen_y !event_modifiers
+</Component>

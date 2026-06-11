@@ -1,0 +1,332 @@
+<Component name="DomSurface">
+  <state>
+    value = 50
+    double_count = 0
+    capture_count = 0
+    bubble_count = 0
+    mouse_enter_count = 0
+    mouse_leave_capture_count = 0
+    selected_values = alloc 64
+    selected_values_len = 0
+    scroll_count = 0
+    toggle_count = 0
+    before_input_count = 0
+    before_input_data = alloc 16
+    before_input_data_len = 0
+    before_input_type = alloc 32
+    before_input_type_len = 0
+    related_target = 0
+    related_target_name = alloc 32
+    related_target_name_len = 0
+    related_target_id = alloc 32
+    related_target_id_len = 0
+    key_value = alloc 16
+    key_value_len = 0
+    key_code = alloc 16
+    key_code_len = 0
+    key_repeat = 0
+    pointer_id = 0
+    pointer_type = alloc 16
+    pointer_type_len = 0
+    pointer_primary = 0
+    wheel_delta_x = 0
+    wheel_delta_y = 0
+    wheel_delta_z = 0
+    wheel_delta_mode = 0
+    touches_len = 0
+    touch_identifier = 0
+    touch_client_x = 0
+    touch_client_y = 0
+    clipboard_text = alloc 32
+    clipboard_text_len = 0
+    drop_text = alloc 32
+    drop_text_len = 0
+  </state>
+
+  <main className="surface" data-kind="dom-surface">
+    <dialog open aria-label="React DOM surface">
+      <details open>
+        <summary>Native controls</summary>
+        <meter min="0" max="100" low="25" high="80" optimum="60" value="50"></meter>
+        <progress max="100" value="35"></progress>
+      </details>
+      <input type="range" min="0" max="100" step="5" value="{value}" tabIndex="0" inputMode="numeric" enterKeyHint="done" autoCapitalize="none" autoCorrect="off" onPointerDown={^bump} autoFocus />
+      <label htmlFor="keyboard-input">Keyboard field</label>
+      <input id="keyboard-input" defaultValue="keyboard" size="12" maxLength="24" minLength="3" placeholder="Type keys" pattern="[A-Za-z]+" accept="text/plain" capture="environment" dirName="keyboard.dir" autoComplete="username" onKeyDown={trackKey} />
+      <output htmlFor="keyboard-input">Keyboard output</output>
+      <input defaultValue="before" onBeforeInput={beforeInput} />
+      <input defaultValue="paste here" onPaste={trackPaste} />
+      <select value="advanced" autoComplete="country-name">
+        <option value="basic" label="Basic option">Basic</option>
+        <option value="advanced" label="Advanced option" defaultSelected>Advanced</option>
+      </select>
+      <select multiple size="3" value="alpha,beta" onChange={syncSelected}>
+        <option value="alpha">Alpha</option>
+        <option value="beta">Beta</option>
+        <option value="gamma">Gamma</option>
+      </select>
+      <select defaultValue="secondary">
+        <option value="primary">Primary</option>
+        <option value="secondary">Secondary</option>
+      </select>
+      <select>
+        <optgroup label="Grouped choices">
+          <option value="grouped" label="Grouped option">Grouped</option>
+        </optgroup>
+      </select>
+      <select multiple defaultValue="delta,epsilon">
+        <option value="delta">Delta</option>
+        <option value="epsilon">Epsilon</option>
+        <option value="zeta">Zeta</option>
+      </select>
+      <textarea rows="4" cols="24" wrap="soft" maxLength="80" minLength="5" placeholder="Write notes" dirName="notes.dir">Textarea default</textarea>
+      <input value="fixed" readOnly required />
+      <input defaultValue="seed" />
+      <input type="checkbox" defaultChecked />
+      <input type="file" multiple />
+      <input type="email" multiple />
+      <input type="image" src="submit.png" alt="Submit image" width="32" height="24" />
+      <button value="disabled-action" disabled>Disabled action</button>
+      <video controls muted loop autoPlay playsInline disablePictureInPicture disableRemotePlayback controlsList="nodownload noplaybackrate" width="160" height="90" poster="poster.png" preload="metadata" crossOrigin="anonymous">
+        <source src="demo.mp4" type="video/mp4" media="(min-width: 1px)" width="320" height="180" />
+        <track src="captions.vtt" kind="captions" srcLang="en" label="English captions" default />
+      </video>
+      <img src="avatar.png" srcSet="avatar.png 1x, avatar@2x.png 2x" sizes="(min-width: 800px) 50vw, 100vw" useMap="#avatar-map" longDesc="/avatar-description" isMap crossOrigin="anonymous" referrerPolicy="no-referrer" loading="lazy" decoding="async" fetchPriority="high" width="64" height="64" alt="Avatar" title="Profile avatar" />
+      <map name="avatar-map"><area alt="Avatar profile area" coords="0,0,32,32" shape="rect" href="/profile" hrefLang="en" download="profile.txt" ping="/map-ping /map-audit" rel="nofollow" target="_self" referrerPolicy="no-referrer" /></map>
+      <a href="/download/report.txt" charSet="utf-8" coords="0,0,16,16" shape="rect" hrefLang="en" download="report.txt" ping="/audit/report /audit/download" rel="noopener" type="text/plain" target="_blank" referrerPolicy="origin">Download report</a>
+      <link rel="preload" href="hero.avif" hrefLang="en-US" charSet="utf-8" as="image" blocking="render" media="screen" type="image/avif" imageSrcSet="hero.avif 1x, hero@2x.avif 2x" imageSizes="100vw" integrity="sha256-demo" fetchPriority="high" crossOrigin="anonymous" referrerPolicy="no-referrer" disabled />
+      <link rel="icon" href="/favicon.svg" sizes="any" type="image/svg+xml" target="_self" />
+      <base href="/docs/" target="_self" />
+      <meta httpEquiv="theme-color" content="#336699" />
+      <style media="screen" type="text/css"></style>
+      <form id="external-form" noValidate action="/submit" acceptCharset="utf-8" encType="multipart/form-data" method="post" rel="noopener" target="_self" autoComplete="off">
+        <button type="submit" formNoValidate formAction="/skip" formEncType="text/plain" formMethod="post" formTarget="_blank">Skip validation</button>
+      </form>
+      <div onClickCapture={captureClick} onClick={bubbleClick}>
+        <button type="button">Nested event</button>
+      </div>
+      <div onMouseEnter={mouseEnter} onMouseLeaveCapture={mouseLeaveCapture}>Mouse boundary</div>
+      <div onMouseOver={trackRelated}>Related target zone</div>
+      <div onScroll={scrollBox}>Scrollable panel</div>
+      <details onToggle={toggleDetails}><summary>Toggle panel</summary><p>Toggle body</p></details>
+      <button onDoubleClick={doubleBump}>Double event</button>
+      <div onWheel={trackWheel}>Wheel area</div>
+      <div onTouchStart={trackTouch}>Touch area</div>
+      <div onDrop={trackDrop}>Drop area</div>
+      <div id="trusted-html" dangerouslySetInnerHTML={{ __html: "<strong>Trusted markup</strong>" }}></div>
+      <div contentEditable="true" suppressContentEditableWarning suppressHydrationWarning spellCheck="false" translate="no" inputMode="text" enterKeyHint="send" autoCapitalize="sentences" autoCorrect="on">Editable region</div>
+      <div id="global-props-panel" name="global-panel" nonce="nonce-panel" lang="en-US" dir="rtl" role="note" accessKey="g" tabIndex="2" slot="toolbar" part="panel" popover="auto">Global props panel</div>
+      <div itemScope itemType="https://schema.org/Thing" itemID="thing-1" itemRef="global-props-panel" itemProp="about">Microdata item</div>
+      <div hidden inert draggable>Hidden inert panel</div>
+      <table>
+        <colgroup span="2" width="120"><col span="1" width="80" /></colgroup>
+        <thead>
+          <tr><th id="h-name" scope="col" abbr="Nm" headers="h-group" width="120" height="32">Name</th></tr>
+        </thead>
+        <tbody>
+          <tr><td rowSpan="2" colSpan="3" headers="h-name" width="240" height="48">Merged cell</td></tr>
+        </tbody>
+      </table>
+      <ol start="3" type="A" reversed><li value="5">Fifth item</li></ol>
+      <data value="product-42">Product 42</data>
+      <param name="quality" value="high" />
+      <blockquote cite="/quotes/source"><q cite="/quotes/inline">Quoted</q><del cite="/edits/old" dateTime="2026-01-01">Old</del><ins cite="/edits/new" dateTime="2026-01-02">New</ins></blockquote>
+      <time dateTime="2026-06-08">Today</time>
+      <meta charSet="utf-8" />
+      <svg viewBox="0 0 10 10" role="img" aria-label="Sample square" width="20" height="20">
+        <rect x="1" y="1" width="8" height="8" fill="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fillRule="evenodd" clipRule="evenodd" vectorEffect="non-scaling-stroke" xlinkHref="#shape"></rect>
+      </svg>
+      <p>Range value: {value}</p>
+      <p>Double clicks: {double_count}</p>
+      <p>Captured: {capture_count}</p>
+      <p>Bubbled: {bubble_count}</p>
+      <p>Mouse enters: {mouse_enter_count}</p>
+      <p>Mouse leave captures: {mouse_leave_capture_count}</p>
+      <p>Selected values: {selected_values}</p>
+      <p>Scrolls: {scroll_count}</p>
+      <p>Toggles: {toggle_count}</p>
+      <p>Before inputs: {before_input_count}</p>
+      <p>Before input data: {before_input_data}</p>
+      <p>Before input type: {before_input_type}</p>
+      <p>Related target: {related_target}</p>
+      <p>Related target name: {related_target_name}</p>
+      <p>Related target id: {related_target_id}</p>
+      <p>Key: {key_value}</p>
+      <p>Code: {key_code}</p>
+      <p>Repeat: {key_repeat}</p>
+      <p>Pointer id: {pointer_id}</p>
+      <p>Pointer type: {pointer_type}</p>
+      <p>Pointer primary: {pointer_primary}</p>
+      <p>Wheel delta: {wheel_delta_x},{wheel_delta_y},{wheel_delta_z}</p>
+      <p>Wheel mode: {wheel_delta_mode}</p>
+      <p>Touches: {touches_len}</p>
+      <p>Touch id: {touch_identifier}</p>
+      <p>Touch client: {touch_client_x},{touch_client_y}</p>
+      <p>Clipboard text: {clipboard_text}</p>
+      <p>Drop text: {drop_text}</p>
+    </dialog>
+  </main>
+
+  @bump:
+  L_ENTRY:
+    value = load state+DomSurface_value as i64
+    value = add value, 5
+    store state+DomSurface_value, value as i64
+    pointer_id = call @sax_event_pointer_id()
+    store state+DomSurface_pointer_id, pointer_id as i64
+    pointer_type = load state+DomSurface_pointer_type as ptr
+    pointer_type_len = call @sax_event_pointer_type(*pointer_type, 16)
+    store state+DomSurface_pointer_type_len, pointer_type_len as i64
+    pointer_primary = call @sax_event_is_primary()
+    store state+DomSurface_pointer_primary, pointer_primary as i64
+    call @render()
+    ret
+
+  @doubleBump:
+  L_ENTRY:
+    double_count = load state+DomSurface_double_count as i64
+    double_count = add double_count, 1
+    store state+DomSurface_double_count, double_count as i64
+    call @render()
+    ret
+
+  @captureClick:
+  L_ENTRY:
+    capture_count = load state+DomSurface_capture_count as i64
+    capture_count = add capture_count, 1
+    store state+DomSurface_capture_count, capture_count as i64
+    call @render()
+    ret
+
+  @bubbleClick:
+  L_ENTRY:
+    bubble_count = load state+DomSurface_bubble_count as i64
+    bubble_count = add bubble_count, 1
+    store state+DomSurface_bubble_count, bubble_count as i64
+    call @render()
+    ret
+
+  @mouseEnter:
+  L_ENTRY:
+    mouse_enter_count = load state+DomSurface_mouse_enter_count as i64
+    mouse_enter_count = add mouse_enter_count, 1
+    store state+DomSurface_mouse_enter_count, mouse_enter_count as i64
+    call @render()
+    ret
+
+  @mouseLeaveCapture:
+  L_ENTRY:
+    mouse_leave_capture_count = load state+DomSurface_mouse_leave_capture_count as i64
+    mouse_leave_capture_count = add mouse_leave_capture_count, 1
+    store state+DomSurface_mouse_leave_capture_count, mouse_leave_capture_count as i64
+    call @render()
+    ret
+
+  @syncSelected:
+  L_ENTRY:
+    selected_values = load state+DomSurface_selected_values as ptr
+    selected_values_len = call @sax_event_target_value(*selected_values, 64)
+    store state+DomSurface_selected_values_len, selected_values_len as i64
+    call @render()
+    ret
+
+  @scrollBox:
+  L_ENTRY:
+    scroll_count = load state+DomSurface_scroll_count as i64
+    scroll_count = add scroll_count, 1
+    store state+DomSurface_scroll_count, scroll_count as i64
+    call @render()
+    ret
+
+  @toggleDetails:
+  L_ENTRY:
+    toggle_count = load state+DomSurface_toggle_count as i64
+    toggle_count = add toggle_count, 1
+    store state+DomSurface_toggle_count, toggle_count as i64
+    call @render()
+    ret
+
+  @trackWheel:
+  L_ENTRY:
+    wheel_delta_x = call @sax_event_delta_x()
+    store state+DomSurface_wheel_delta_x, wheel_delta_x as i64
+    wheel_delta_y = call @sax_event_delta_y()
+    store state+DomSurface_wheel_delta_y, wheel_delta_y as i64
+    wheel_delta_z = call @sax_event_delta_z()
+    store state+DomSurface_wheel_delta_z, wheel_delta_z as i64
+    wheel_delta_mode = call @sax_event_delta_mode()
+    store state+DomSurface_wheel_delta_mode, wheel_delta_mode as i64
+    call @render()
+    ret
+
+  @trackTouch:
+  L_ENTRY:
+    touches_len = call @sax_event_touches_len()
+    store state+DomSurface_touches_len, touches_len as i64
+    touch_identifier = call @sax_event_touch_identifier()
+    store state+DomSurface_touch_identifier, touch_identifier as i64
+    touch_client_x = call @sax_event_touch_client_x()
+    store state+DomSurface_touch_client_x, touch_client_x as i64
+    touch_client_y = call @sax_event_touch_client_y()
+    store state+DomSurface_touch_client_y, touch_client_y as i64
+    call @render()
+    ret
+
+  @trackPaste:
+  L_ENTRY:
+    clipboard_text = load state+DomSurface_clipboard_text as ptr
+    clipboard_text_len = call @sax_event_clipboard_text(*clipboard_text, 32)
+    store state+DomSurface_clipboard_text_len, clipboard_text_len as i64
+    call @render()
+    ret
+
+  @trackDrop:
+  L_ENTRY:
+    drop_text = load state+DomSurface_drop_text as ptr
+    drop_text_len = call @sax_event_data_transfer_text(*drop_text, 32)
+    store state+DomSurface_drop_text_len, drop_text_len as i64
+    call @render()
+    ret
+
+  @beforeInput:
+  L_ENTRY:
+    before_input_count = load state+DomSurface_before_input_count as i64
+    before_input_count = add before_input_count, 1
+    store state+DomSurface_before_input_count, before_input_count as i64
+    before_input_data = load state+DomSurface_before_input_data as ptr
+    before_input_data_len = call @sax_event_data(*before_input_data, 16)
+    store state+DomSurface_before_input_data_len, before_input_data_len as i64
+    before_input_type = load state+DomSurface_before_input_type as ptr
+    before_input_type_len = call @sax_event_input_type(*before_input_type, 32)
+    store state+DomSurface_before_input_type_len, before_input_type_len as i64
+    call @render()
+    ret
+
+  @trackRelated:
+  L_ENTRY:
+    related_target = call @sax_event_related_target()
+    store state+DomSurface_related_target, related_target as i64
+    related_target_name = load state+DomSurface_related_target_name as ptr
+    related_target_name_len = call @sax_event_related_target_name(*related_target_name, 32)
+    store state+DomSurface_related_target_name_len, related_target_name_len as i64
+    related_target_id = load state+DomSurface_related_target_id as ptr
+    related_target_id_len = call @sax_event_related_target_id(*related_target_id, 32)
+    store state+DomSurface_related_target_id_len, related_target_id_len as i64
+    call @render()
+    ret
+
+  @trackKey:
+  L_ENTRY:
+    key_value = load state+DomSurface_key_value as ptr
+    key_value_len = call @sax_event_key(*key_value, 16)
+    store state+DomSurface_key_value_len, key_value_len as i64
+    key_code = load state+DomSurface_key_code as ptr
+    key_code_len = call @sax_event_code(*key_code, 16)
+    store state+DomSurface_key_code_len, key_code_len as i64
+    key_repeat = call @sax_event_repeat()
+    store state+DomSurface_key_repeat, key_repeat as i64
+    call @render()
+    ret
+
+  !value !double_count !capture_count !bubble_count !mouse_enter_count !mouse_leave_capture_count !selected_values !selected_values_len !scroll_count !toggle_count !before_input_count !before_input_data !before_input_data_len !before_input_type !before_input_type_len !related_target !related_target_name !related_target_name_len !related_target_id !related_target_id_len !key_value !key_value_len !key_code !key_code_len !key_repeat !pointer_id !pointer_type !pointer_type_len !pointer_primary !wheel_delta_x !wheel_delta_y !wheel_delta_z !wheel_delta_mode !touches_len !touch_identifier !touch_client_x !touch_client_y !clipboard_text !clipboard_text_len !drop_text !drop_text_len
+</Component>

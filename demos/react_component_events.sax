@@ -1,0 +1,43 @@
+<Component name="EventForwarding">
+  <state>
+    clicks = 0
+    changes = 0
+  </state>
+
+  <section class="component-events">
+    <h1>Component Events</h1>
+    <p>Clicks: {clicks}</p>
+    <p>Changes: {changes}</p>
+    <ActionButton onClick={record_click}>Forwarded button</ActionButton>
+    <InputShell onChange={record_change} />
+  </section>
+
+  @record_click:
+  L_ENTRY:
+    clicks = load state+EventForwarding_clicks as i64
+    clicks = add clicks, 1
+    store state+EventForwarding_clicks, clicks as i64
+    call @render()
+    ret
+
+  @record_change:
+  L_ENTRY:
+    changes = load state+EventForwarding_changes as i64
+    changes = add changes, 1
+    store state+EventForwarding_changes, changes as i64
+    call @render()
+    ret
+
+  !clicks !changes
+</Component>
+
+<Component name="ActionButton">
+  <button class="action-button"><Slot /></button>
+</Component>
+
+<Component name="InputShell">
+  <label class="input-shell">
+    Wrapped input
+    <input value="initial" />
+  </label>
+</Component>
