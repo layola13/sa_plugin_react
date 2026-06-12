@@ -2,6 +2,7 @@ const std = @import("std");
 const plugin_api = @import("plugin_api");
 const parser = @import("react/parser.zig");
 const lowerer = @import("react/lowerer.zig");
+const reachability = @import("react/reachability.zig");
 const airlock_gen = @import("react/airlock_gen.zig");
 const sax_build = @import("react/build.zig");
 
@@ -786,14 +787,17 @@ fn compileSaxArtifacts(
         try sa_code.appendSlice(sa3d_support.prelude.items);
         sa3d_airlock_js = sa3d_support.airlock_js;
     }
-    for (program.components, 0..) |component, idx| {
-        var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, program.components, component);
+    const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
+    defer allocator.free(reachable_components);
+
+    for (reachable_components, 0..) |component, idx| {
+        var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
         defer sax_lowerer.deinit();
         sax_lowerer.lower(&sa_code, .{ .emit_shared_decls = idx == 0 }) catch |err| {
             try stderr.print("error[SA-REACT-LOWER]: component {s} failed: {s}\n", .{ component.name, @errorName(err) });
             return err;
         };
-        if (idx + 1 < program.components.len) try sa_code.writer().writeByte('\n');
+        if (idx + 1 < reachable_components.len) try sa_code.writer().writeByte('\n');
     }
 
     const root_name = try lowercaseName(allocator, program.components[0].name);
@@ -920,7 +924,7 @@ fn executeSaxBuild(
         wasm_path,
         false,
         .release_small,
-        .{},
+        .{ .jobs = 1, .dce = .full },
         stderr,
     );
     if (build_code != 0) return build_code;

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 fn writeTestWasm(path: []const u8) !void {
     try ensureParentDir(path);
@@ -144,7 +145,7 @@ const TestDriver = struct {
 };
 
 const TestEmitLlvmc = struct {
-    pub const EmitOptions = struct { debug: bool = false, wasm_compat: bool = false, jobs: ?usize = null };
+    pub const EmitOptions = struct { debug: bool = false, wasm_compat: bool = false, jobs: ?usize = null, dce: emit_options.DceMode = .std, std_root: ?[]const u8 = null };
     pub fn emitLlvmcToFile(
         allocator: std.mem.Allocator,
         verified: anytype,
@@ -200,7 +201,7 @@ const TestFlattenResult = struct {
 const TestFlattener = struct {
     pub const FlattenResult = TestFlattenResult;
     pub const ErrorContext = struct {};
-    pub const ResolveContext = struct { dependencies: []const u8 = &.{}, options: struct { project_root: []const u8 } = .{ .project_root = "" } };
+    pub const ResolveContext = struct { dependencies: []const u8 = &.{}, options: struct { project_root: []const u8, std_root: ?[]const u8 = null } = .{ .project_root = "" } };
     pub fn takeErrorSourceLine(ctx: *ErrorContext) ?u32 {
         _ = ctx;
         return null;
@@ -227,6 +228,7 @@ const TestPkgResolver = struct {
 };
 
 const driver = if (builtin.is_test) TestDriver else @import("../driver/zigcc.zig");
+const emit_options = @import("../emit_options.zig");
 const emit_llvm_llvmc = if (builtin.is_test) TestEmitLlvmc else @import("../emit_llvm_llvmc.zig");
 const flattener = if (builtin.is_test) TestFlattener else @import("../flattener.zig");
 const manifest = if (builtin.is_test) TestManifest else @import("../pkg/manifest.zig");
@@ -234,7 +236,10 @@ const pkg_resolver = if (builtin.is_test) TestPkgResolver else @import("../pkg/r
 const referee = if (builtin.is_test) TestReferee else @import("../referee.zig");
 const trap = @import("../common/trap.zig");
 
-pub const CompileOptions = struct { jobs: ?usize = null };
+pub const CompileOptions = struct {
+    jobs: ?usize = null,
+    dce: emit_options.DceMode = .std,
+};
 
 pub const CompileOk = if (builtin.is_test) struct {
     pub fn deinit(self: *CompileOk, allocator: std.mem.Allocator) void {
@@ -292,6 +297,18 @@ fn projectRootFromSourcePath(allocator: std.mem.Allocator, source_path: []const 
     }
 
     return cwd_abs;
+}
+
+fn stdRootFromEnv(allocator: std.mem.Allocator) ![]u8 {
+    const env_root = std.process.getEnvVarOwned(allocator, "SA_STD_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    if (env_root) |root| {
+        errdefer allocator.free(root);
+        return root;
+    }
+    return try std.fs.path.join(allocator, &.{ build_options.repo_root, "sa_std" });
 }
 
 fn readProjectManifest(allocator: std.mem.Allocator, source_path: []const u8) !?manifest.Manifest {
@@ -457,6 +474,8 @@ pub fn compileSourceText(
 
     const project_root = try projectRootFromSourcePath(allocator, source_path);
     defer allocator.free(project_root);
+    const std_root = try stdRootFromEnv(allocator);
+    defer allocator.free(std_root);
 
     var project_manifest = try readProjectManifest(allocator, source_path);
     defer if (project_manifest) |*m| m.deinit(allocator);
@@ -473,7 +492,7 @@ pub fn compileSourceText(
     var error_ctx: flattener.ErrorContext = .{};
     const resolve_ctx = flattener.ResolveContext{
         .dependencies = dependency_slice,
-        .options = .{ .project_root = project_root },
+        .options = .{ .project_root = project_root, .std_root = std_root },
     };
     var flat = flattener.flattenFileWithContextAndPackages(allocator, source_path, source_text, &error_ctx, resolve_ctx) catch |err| {
         return .{ .trap = trapFromFlattenError(source_text, err, flattener.takeErrorSourceLine(&error_ctx)) };
@@ -509,6 +528,67 @@ pub fn buildBrowserWasmFromSourceText(
         return 0;
     }
 
+    const exports = dupeWasmExports(allocator, source_text) catch |err| {
+        try stderr.print("error[SAX-CACHE-EXPORTS]: failed to extract exports: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer freeWasmExports(allocator, exports);
+
+    const std_root = stdRootFromEnv(allocator) catch |err| {
+        try stderr.print("error[SAX-CACHE-STD]: failed to resolve std root: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(std_root);
+
+    const hash = getBrowserWasmCacheKey(allocator, source_text, debug, optimization, options.dce, exports, std_root) catch |err| {
+        try stderr.print("error[SAX-CACHE-HASH]: failed to compute cache key: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    var hash_hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+
+    const project_root = projectRootFromSourcePath(allocator, source_path) catch |err| {
+        try stderr.print("error[SAX-CACHE-ROOT]: failed to find project root: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(project_root);
+
+    const cache_dir = std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-browser-wasm", &hash_hex }) catch |err| {
+        try stderr.print("error[SAX-CACHE-PATH]: failed to join cache dir path: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(cache_dir);
+
+    const cached_wasm = std.fs.path.join(allocator, &.{ cache_dir, "output.wasm" }) catch |err| {
+        try stderr.print("error[SAX-CACHE-PATH]: failed to join cached wasm path: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(cached_wasm);
+    const cached_bc = std.fs.path.join(allocator, &.{ cache_dir, "artifact.sa.bc" }) catch |err| {
+        try stderr.print("error[SAX-CACHE-PATH]: failed to join cached bc path: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(cached_bc);
+
+    const artifact_path = std.fmt.allocPrint(allocator, "{s}.sa.bc", .{out_path}) catch |err| {
+        try stderr.print("error[SAX-CACHE-PATH]: failed to format artifact path: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(artifact_path);
+
+    if (filePresentNonEmpty(cached_wasm) and filePresentNonEmpty(cached_bc)) {
+        copyFile(cached_wasm, out_path) catch |err| {
+            try stderr.print("error[SAX-CACHE-COPY]: failed to copy cached wasm: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        copyFile(cached_bc, artifact_path) catch |err| {
+            try stderr.print("error[SAX-CACHE-COPY]: failed to copy cached bc: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        try stderr.print("  [vite] browser wasm cache hit: {s}\n", .{hash_hex[0..12]});
+        return 0;
+    }
+
     const compiled = try compileSourceText(allocator, source_path, source_text, options);
     switch (compiled) {
         .trap => |report| {
@@ -519,14 +599,9 @@ pub fn buildBrowserWasmFromSourceText(
             var owned = ok;
             defer owned.deinit(allocator);
 
-            const artifact_path = try std.fmt.allocPrint(allocator, "{s}.sa.bc", .{out_path});
-            defer allocator.free(artifact_path);
-
             try ensureParentDir(artifact_path);
-            try emit_llvm_llvmc.emitLlvmcToFile(allocator, owned.verified, &owned.flat.def_dict, owned.flat.loc_table, source_path, 32, .{ .debug = debug, .wasm_compat = true, .jobs = options.jobs }, artifact_path);
+            try emit_llvm_llvmc.emitLlvmcToFile(allocator, owned.verified, &owned.flat.def_dict, owned.flat.loc_table, source_path, 32, .{ .debug = debug, .wasm_compat = true, .jobs = options.jobs, .dce = options.dce, .std_root = std_root }, artifact_path);
 
-            const exports = try dupeWasmExports(allocator, source_text);
-            defer freeWasmExports(allocator, exports);
             driver.compileWasm(
                 allocator,
                 artifact_path,
@@ -539,9 +614,164 @@ pub fn buildBrowserWasmFromSourceText(
                 error.ChildProcessFailed => return 1,
                 else => return err,
             };
+
+            if (std.fs.path.dirname(cached_wasm)) |dir| {
+                if (dir.len != 0) std.fs.cwd().makePath(dir) catch {};
+            }
+            std.fs.cwd().copyFile(out_path, std.fs.cwd(), cached_wasm, .{}) catch {};
+            std.fs.cwd().copyFile(artifact_path, std.fs.cwd(), cached_bc, .{}) catch {};
+
+            const cached_manifest = std.fs.path.join(allocator, &.{ cache_dir, "manifest.json" }) catch null;
+            if (cached_manifest) |man_path| {
+                defer allocator.free(man_path);
+                var manifest_file = std.fs.cwd().createFile(man_path, .{}) catch null;
+                if (manifest_file) |*f| {
+                    defer f.close();
+                    f.writer().print(
+                        \\{{
+                        \\  "version": 1,
+                        \\  "debug": {},
+                        \\  "optimization": "{s}",
+                        \\  "dce": "{s}",
+                        \\  "exports_count": {}
+                        \\}}
+                    , .{ debug, @tagName(optimization), options.dce.name(), exports.len }) catch {};
+                }
+            }
+
             return 0;
         },
     }
+}
+
+fn getBrowserWasmCacheKey(
+    allocator: std.mem.Allocator,
+    source_text: []const u8,
+    debug: bool,
+    optimization: anytype,
+    dce: emit_options.DceMode,
+    exports: []const []const u8,
+    std_root: []const u8,
+) ![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("sa-plugin-browser-wasm-cache-v2");
+    hasher.update(&[_]u8{0});
+    hasher.update(build_options.repo_root);
+    hasher.update(&[_]u8{0});
+    try hashRuntimeBuildInputs(allocator, &hasher);
+    hasher.update(std_root);
+    hasher.update(&[_]u8{0});
+    try hashSaStdTree(allocator, &hasher, std_root);
+    hasher.update(source_text);
+    hasher.update(&[_]u8{0});
+    hasher.update(if (debug) "\x01" else "\x00");
+    hasher.update(&[_]u8{0});
+    hasher.update(@tagName(optimization));
+    hasher.update(&[_]u8{0});
+    hasher.update(dce.name());
+    hasher.update(&[_]u8{0});
+    for (exports) |exp| {
+        hasher.update(exp);
+        hasher.update(&[_]u8{0});
+    }
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
+}
+
+fn isSaStdSource(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".sa") or
+        std.mem.endsWith(u8, path, ".sai") or
+        std.mem.endsWith(u8, path, ".sal");
+}
+
+fn hashNormalizedPath(hasher: *std.crypto.hash.sha2.Sha256, path: []const u8) void {
+    var byte: [1]u8 = undefined;
+    for (path) |c| {
+        byte[0] = if (std.fs.path.isSep(c)) '/' else c;
+        hasher.update(&byte);
+    }
+}
+
+fn hashFileContentIfPresent(allocator: std.mem.Allocator, hasher: *std.crypto.hash.sha2.Sha256, path: []const u8) !void {
+    if (path.len == 0) return;
+    hashNormalizedPath(hasher, path);
+    hasher.update(&[_]u8{0});
+    var file = if (std.fs.path.isAbsolute(path))
+        std.fs.openFileAbsolute(path, .{}) catch return
+    else
+        std.fs.cwd().openFile(path, .{}) catch return;
+    defer file.close();
+    const bytes = try file.readToEndAlloc(allocator, 128 * 1024 * 1024);
+    defer allocator.free(bytes);
+    hasher.update(bytes);
+    hasher.update(&[_]u8{0});
+}
+
+fn hashRuntimeBuildInputs(allocator: std.mem.Allocator, hasher: *std.crypto.hash.sha2.Sha256) !void {
+    if (@hasDecl(build_options, "sa_bin")) {
+        try hashFileContentIfPresent(allocator, hasher, build_options.sa_bin);
+    }
+    const plugin_path = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return,
+        else => return err,
+    };
+    defer allocator.free(plugin_path);
+
+    hasher.update(plugin_path);
+    hasher.update(&[_]u8{0});
+    var parts = std.mem.splitScalar(u8, plugin_path, ':');
+    while (parts.next()) |entry| {
+        try hashFileContentIfPresent(allocator, hasher, entry);
+    }
+}
+
+fn hashSaStdTree(allocator: std.mem.Allocator, hasher: *std.crypto.hash.sha2.Sha256, std_root: []const u8) !void {
+    var entries = std.ArrayList([]u8).init(allocator);
+    defer {
+        for (entries.items) |entry| allocator.free(entry);
+        entries.deinit();
+    }
+
+    var root = try std.fs.cwd().openDir(std_root, .{ .iterate = true });
+    defer root.close();
+
+    var walker = try root.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file or !isSaStdSource(entry.path)) continue;
+        const copied = try allocator.dupe(u8, entry.path);
+        errdefer allocator.free(copied);
+        try entries.append(copied);
+    }
+
+    std.mem.sort([]u8, entries.items, {}, struct {
+        fn lessThan(_: void, lhs: []u8, rhs: []u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    }.lessThan);
+
+    for (entries.items) |entry_path| {
+        const file_bytes = try root.readFileAlloc(allocator, entry_path, 16 * 1024 * 1024);
+        defer allocator.free(file_bytes);
+        hashNormalizedPath(hasher, entry_path);
+        hasher.update(&[_]u8{0});
+        hasher.update(file_bytes);
+        hasher.update(&[_]u8{0});
+    }
+}
+
+fn filePresentNonEmpty(path: []const u8) bool {
+    const stat = std.fs.cwd().statFile(path) catch return false;
+    return stat.kind == .file and stat.size != 0;
+}
+
+fn copyFile(src: []const u8, dst: []const u8) !void {
+    if (std.fs.path.dirname(dst)) |dir| {
+        if (dir.len != 0) try std.fs.cwd().makePath(dir);
+    }
+    try std.fs.cwd().copyFile(src, std.fs.cwd(), dst, .{});
 }
 
 fn ensureParentDir(path: []const u8) !void {

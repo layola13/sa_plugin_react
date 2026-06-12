@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "repo_root", sa_repo_root);
+    build_options.addOption([]const u8, "sa_bin", sa_bin);
 
     const plugin_api = b.createModule(.{
         .root_source_file = b.path("src/plugin_api.zig"),

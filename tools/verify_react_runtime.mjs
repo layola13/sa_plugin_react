@@ -829,7 +829,7 @@ async function verifyComponentEvents(outDir) {
   input.dispatchEvent({ type: "input" });
   expectText(root, "Changes: 1");
   input.dispatchEvent({ type: "change" });
-  expectText(root, "Changes: 2");
+  expectText(root, "Changes: 1");
 }
 
 async function verifyDomSurface(outDir) {

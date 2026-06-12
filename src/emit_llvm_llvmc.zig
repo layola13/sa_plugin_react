@@ -508,6 +508,155 @@ fn findFunctionSigIndex(sigs: []const sig.FunctionSig, name: []const u8) ?usize 
     return null;
 }
 
+fn markReachableFunctionByName(reachable: *std.StringHashMap(void), sigs: []const sig.FunctionSig, name: []const u8) !bool {
+    const idx = findFunctionSigIndex(sigs, name) orelse return false;
+    const canonical_name = sigs[idx].name;
+    if (reachable.contains(canonical_name)) return false;
+    try reachable.put(canonical_name, {});
+    return true;
+}
+
+fn collectBodyDirectCallees(allocator: std.mem.Allocator, verified: anytype, start_idx: usize, end_idx: usize, reachable: *std.StringHashMap(void)) !bool {
+    var changed = false;
+    for (verified.annotated[start_idx..end_idx]) |body_item| {
+        const base = body_item.base;
+        if (base.kind != .call and base.kind != .call_indirect) continue;
+
+        var parsed = call.parseCall(allocator, base.raw_text) catch |err| switch (err) {
+            error.InvalidCallSyntax => continue,
+            else => return err,
+        };
+        defer parsed.deinit(allocator);
+
+        if (parsed.is_indirect) continue;
+        changed = (try markReachableFunctionByName(reachable, verified.function_sigs, parsed.callee)) or changed;
+    }
+    return changed;
+}
+
+fn collectNormalBuildReachability(allocator: std.mem.Allocator, verified: anytype, reachable: *std.StringHashMap(void)) !void {
+    for (verified.const_decls) |decl| {
+        switch (decl.value) {
+            .vtable => |literal| {
+                for (literal.slots) |slot| {
+                    _ = try markReachableFunctionByName(reachable, verified.function_sigs, slot.func_name);
+                }
+            },
+            else => {},
+        }
+    }
+
+    var sig_index: usize = 0;
+    var idx: usize = 0;
+    while (idx < verified.annotated.len) : (idx += 1) {
+        const item = verified.annotated[idx].base;
+        switch (item.kind) {
+            .func_decl, .ffi_wrapper_decl, .extern_decl, .export_decl, .test_decl => {
+                if (sig_index >= verified.function_sigs.len) return error.UnknownFunction;
+                const fsig = verified.function_sigs[sig_index];
+                sig_index += 1;
+
+                const is_main = fsig.kind == .normal and std.mem.eql(u8, fsig.name, "main") and fsig.params.len == 0;
+                const is_public_entry = item.kind == .export_decl or item.kind == .ffi_wrapper_decl or item.kind == .extern_decl;
+                if (is_main or is_public_entry) try reachable.put(fsig.name, {});
+            },
+            else => {},
+        }
+    }
+
+    var changed = true;
+    while (changed) {
+        changed = false;
+        sig_index = 0;
+        idx = 0;
+        while (idx < verified.annotated.len) : (idx += 1) {
+            const item = verified.annotated[idx].base;
+            switch (item.kind) {
+                .func_decl, .ffi_wrapper_decl, .extern_decl, .export_decl, .test_decl => {
+                    if (sig_index >= verified.function_sigs.len) return error.UnknownFunction;
+                    const fsig = verified.function_sigs[sig_index];
+                    sig_index += 1;
+                    var end = idx + 1;
+                    while (end < verified.annotated.len and switch (verified.annotated[end].base.kind) {
+                        .func_decl, .ffi_wrapper_decl, .extern_decl, .export_decl, .test_decl => false,
+                        else => true,
+                    }) : (end += 1) {}
+
+                    if (reachable.contains(fsig.name)) {
+                        changed = (try collectBodyDirectCallees(allocator, verified, idx + 1, end, reachable)) or changed;
+                    }
+                    idx = end - 1;
+                },
+                else => {},
+            }
+        }
+    }
+}
+
+fn isPathSepByte(byte: u8) bool {
+    return byte == '/' or byte == '\\';
+}
+
+fn trimTrailingPathSeps(path: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 0 and isPathSepByte(path[end - 1])) : (end -= 1) {}
+    return path[0..end];
+}
+
+fn pathIsUnderRoot(path: []const u8, root_path: []const u8) bool {
+    const root = trimTrailingPathSeps(root_path);
+    if (root.len == 0) return false;
+    if (std.mem.eql(u8, path, root)) return true;
+    return path.len > root.len and std.mem.startsWith(u8, path, root) and isPathSepByte(path[root.len]);
+}
+
+fn pathHasSegment(path: []const u8, segment: []const u8) bool {
+    var start: usize = 0;
+    while (start <= path.len) {
+        var end = start;
+        while (end < path.len and !isPathSepByte(path[end])) : (end += 1) {}
+        if (std.mem.eql(u8, path[start..end], segment)) return true;
+        if (end == path.len) break;
+        start = end + 1;
+    }
+    return false;
+}
+
+fn functionSourcePath(fsig: sig.FunctionSig, source_path: []const u8) []const u8 {
+    if (fsig.upstream_loc) |loc| return loc.file;
+    if (fsig.upstream_file) |file| return file;
+    return source_path;
+}
+
+fn functionHasStdOrigin(fsig: sig.FunctionSig, source_path: []const u8, std_root: ?[]const u8) bool {
+    const path = functionSourcePath(fsig, source_path);
+    if (std_root) |root| {
+        if (pathIsUnderRoot(path, root)) return true;
+    }
+    return pathHasSegment(path, "sa_std");
+}
+
+fn markStdDceUserRoots(reachable: *std.StringHashMap(void), sigs: []const sig.FunctionSig, source_path: []const u8, std_root: ?[]const u8) !void {
+    for (sigs) |fsig| {
+        if (!functionHasStdOrigin(fsig, source_path, std_root)) try reachable.put(fsig.name, {});
+    }
+}
+
+fn collectDceReachability(allocator: std.mem.Allocator, verified: anytype, source_path: []const u8, options: EmitOptions, reachable: *std.StringHashMap(void)) !void {
+    if (options.dce == .std) {
+        try markStdDceUserRoots(reachable, verified.function_sigs, source_path, options.std_root);
+    }
+    try collectNormalBuildReachability(allocator, verified, reachable);
+}
+
+fn shouldPruneUnreachableFunction(options: EmitOptions, fsig: sig.FunctionSig, source_path: []const u8) bool {
+    return switch (options.dce) {
+        .no => false,
+        .full => true,
+        .std => functionHasStdOrigin(fsig, source_path, options.std_root),
+    };
+}
+
 fn functionSigShapeEqual(lhs: sig.FunctionSig, rhs: sig.FunctionSig) bool {
     if (lhs.return_cap != rhs.return_cap or lhs.return_ty != rhs.return_ty or lhs.return_fallible != rhs.return_fallible) return false;
     if (lhs.params.len != rhs.params.len) return false;
@@ -890,7 +1039,11 @@ fn emitLlvmcInternal(allocator: std.mem.Allocator, verified: anytype, def_dict: 
     try collectAnonStringConsts(a, verified.annotated, &anon_string_names, &c_consts);
 
     var referenced_functions = std.StringHashMap(void).init(a);
-    if (options.codegen_unit_index) |cgu_idx| {
+    var prune_unreachable = options.dce != .no and !options.test_mode and options.codegen_unit_index == null;
+    if (prune_unreachable) {
+        try collectDceReachability(a, verified, source_path, options, &referenced_functions);
+        prune_unreachable = referenced_functions.count() != 0;
+    } else if (options.codegen_unit_index) |cgu_idx| {
         // Collect functions referenced in Trait vtables
         for (verified.const_decls) |decl| {
             switch (decl.value) {
@@ -979,6 +1132,8 @@ fn emitLlvmcInternal(allocator: std.mem.Allocator, verified: anytype, def_dict: 
                         // Not needed at all, completely skip!
                         should_include = false;
                     }
+                } else if (prune_unreachable and !referenced_functions.contains(fsig.name) and shouldPruneUnreachableFunction(options, fsig, source_path)) {
+                    should_include = false;
                 }
 
                 if (should_include) {
@@ -1139,7 +1294,11 @@ pub fn emitLlvmcToArtifacts(allocator: std.mem.Allocator, verified: anytype, def
     try collectAnonStringConsts(a, verified.annotated, &anon_string_names, &c_consts);
 
     var referenced_functions = std.StringHashMap(void).init(a);
-    if (options.codegen_unit_index) |cgu_idx| {
+    var prune_unreachable = options.dce != .no and !options.test_mode and options.codegen_unit_index == null;
+    if (prune_unreachable) {
+        try collectDceReachability(a, verified, source_path, options, &referenced_functions);
+        prune_unreachable = referenced_functions.count() != 0;
+    } else if (options.codegen_unit_index) |cgu_idx| {
         for (verified.const_decls) |decl| {
             switch (decl.value) {
                 .vtable => |literal| {
@@ -1219,6 +1378,8 @@ pub fn emitLlvmcToArtifacts(allocator: std.mem.Allocator, verified: anytype, def
                     } else {
                         should_include = false;
                     }
+                } else if (prune_unreachable and !referenced_functions.contains(fsig.name) and shouldPruneUnreachableFunction(options, fsig, source_path)) {
+                    should_include = false;
                 }
 
                 if (should_include) {
@@ -1321,6 +1482,37 @@ pub fn emitLlvmcToFile(allocator: std.mem.Allocator, verified: anytype, def_dict
     var file = if (std.fs.path.isAbsolute(path)) try std.fs.createFileAbsolute(path, .{ .truncate = true }) else try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(verified_bitcode);
+}
+
+test "dce modes prune std and user functions at distinct levels" {
+    const std_func = sig.FunctionSig{
+        .id = 0,
+        .name = "std_unused",
+        .params = &.{},
+        .kind = .normal,
+        .return_cap = null,
+        .return_ty = .void,
+        .entry_inst_idx = 0,
+        .is_ffi_wrapper = false,
+        .upstream_file = "/tmp/app/sa_std/core/unused.sa",
+    };
+    const user_func = sig.FunctionSig{
+        .id = 1,
+        .name = "user_unused",
+        .params = &.{},
+        .kind = .normal,
+        .return_cap = null,
+        .return_ty = .void,
+        .entry_inst_idx = 0,
+        .is_ffi_wrapper = false,
+        .upstream_file = "/tmp/app/src/user.sa",
+    };
+
+    const source_path = "/tmp/app/src/main.sa";
+    try std.testing.expect(shouldPruneUnreachableFunction(.{ .dce = .std, .std_root = "/tmp/app/sa_std" }, std_func, source_path));
+    try std.testing.expect(!shouldPruneUnreachableFunction(.{ .dce = .std, .std_root = "/tmp/app/sa_std" }, user_func, source_path));
+    try std.testing.expect(shouldPruneUnreachableFunction(.{ .dce = .full, .std_root = "/tmp/app/sa_std" }, user_func, source_path));
+    try std.testing.expect(!shouldPruneUnreachableFunction(.{ .dce = .no, .std_root = "/tmp/app/sa_std" }, std_func, source_path));
 }
 
 test "llvmc backend can construct and write bitcode in memory" {

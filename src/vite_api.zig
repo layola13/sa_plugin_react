@@ -1,6 +1,7 @@
 const std = @import("std");
 const parser = @import("react/parser.zig");
 const lowerer = @import("react/lowerer.zig");
+const reachability = @import("react/reachability.zig");
 const airlock_gen = @import("react/airlock_gen.zig");
 const sax_build = @import("react/build.zig");
 
@@ -138,6 +139,11 @@ pub fn resolveIncludePath(allocator: std.mem.Allocator, sax_file: []const u8, in
     if (fileExists(relative)) return relative;
     allocator.free(relative);
 
+    const cwd_relative = try allocator.dupe(u8, include_file);
+    errdefer allocator.free(cwd_relative);
+    if (fileExists(cwd_relative)) return cwd_relative;
+    allocator.free(cwd_relative);
+
     if (try findIncludeInPathList(allocator, "SA_REACT_INCLUDE_PATH", include_file)) |path| return path;
     if (try findIncludeNearLoadedPlugins(allocator, include_file)) |path| return path;
     if (try findInstalledPluginInclude(allocator, include_file)) |path| return path;
@@ -193,14 +199,17 @@ pub fn compileBrowserArtifacts(
 
     var sa_code = std.ArrayList(u8).init(allocator);
     errdefer sa_code.deinit();
-    for (program.components, 0..) |component, idx| {
-        var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, program.components, component);
+    const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
+    defer allocator.free(reachable_components);
+
+    for (reachable_components, 0..) |component, idx| {
+        var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
         defer sax_lowerer.deinit();
         sax_lowerer.lower(&sa_code, .{ .emit_shared_decls = idx == 0 }) catch |err| {
             try stderr.print("error[SA-REACT-LOWER]: component {s} failed: {s}\n", .{ component.name, @errorName(err) });
             return err;
         };
-        if (idx + 1 < program.components.len) try sa_code.writer().writeByte('\n');
+        if (idx + 1 < reachable_components.len) try sa_code.writer().writeByte('\n');
     }
 
     const root_name = try lowercaseName(allocator, program.components[0].name);
@@ -230,11 +239,30 @@ pub fn buildBrowserWasmFromSourceText(
     optimization: anytype,
     stderr: anytype,
 ) !u8 {
-    return sax_build.buildBrowserWasmFromSourceText(allocator, source_path, source_text, out_path, debug, optimization, .{}, stderr);
+    return sax_build.buildBrowserWasmFromSourceText(allocator, source_path, source_text, out_path, debug, optimization, .{ .jobs = 1, .dce = .full }, stderr);
 }
 
 test "react vite api resolves dev plugin include" {
     const path = try resolveIncludePath(std.testing.allocator, "demos/app.sax", "mui/material.sax");
     defer std.testing.allocator.free(path);
     try std.testing.expect(std.mem.endsWith(u8, path, "mui/material.sax"));
+}
+
+test "react vite api resolves includes relative to cwd before plugin installs" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("demos");
+    try tmp.dir.makePath("mui");
+    try tmp.dir.writeFile(.{ .sub_path = "demos/app.sax", .data = "<Component name=\"App\"><div /></Component>" });
+    try tmp.dir.writeFile(.{ .sub_path = "mui/material.sax", .data = "<Component name=\"LocalMui\"><div /></Component>" });
+
+    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    defer old_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer old_cwd.setAsCwd() catch {};
+
+    const path = try resolveIncludePath(std.testing.allocator, "demos/app.sax", "mui/material.sax");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("mui/material.sax", path);
 }

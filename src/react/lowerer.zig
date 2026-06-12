@@ -580,6 +580,7 @@ pub const SaxLowerer = struct {
     dom_slot_count: usize,
     string_pool: StringPool,
     event_handlers: std.StringHashMap([]const u8),
+    label_scope_counter: usize,
 
     pub fn init(allocator: Allocator, component: parser.Component) !SaxLowerer {
         return initWithProgram(allocator, &.{}, component);
@@ -630,6 +631,7 @@ pub const SaxLowerer = struct {
             .dom_slot_count = dom_slot_count,
             .string_pool = pool,
             .event_handlers = event_handlers,
+            .label_scope_counter = 0,
         };
     }
 
@@ -639,6 +641,15 @@ pub const SaxLowerer = struct {
         self.allocator.free(self.node_slots);
         self.allocator.free(self.state_slots);
         self.* = undefined;
+    }
+
+    fn allocLabelPrefix(self: *SaxLowerer, prefix: []const u8) ![]u8 {
+        const scoped = try std.fmt.allocPrint(self.allocator, "{s}_{d}", .{ prefix, self.label_scope_counter });
+        self.label_scope_counter += 1;
+        for (scoped) |*c| {
+            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
+        }
+        return scoped;
     }
 
     fn stateVarIndex(self: *const SaxLowerer, name: []const u8) ?usize {
@@ -687,6 +698,39 @@ pub const SaxLowerer = struct {
 
     fn componentStateSlotConstName(self: *const SaxLowerer, component_name: []const u8, state_name: []const u8) ![]const u8 {
         return try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ component_name, state_name });
+    }
+
+    fn componentPreferredOnChangeEvent(self: *const SaxLowerer, component_name: []const u8) ?[]const u8 {
+        return self.componentPreferredOnChangeEventDepth(component_name, 0);
+    }
+
+    fn componentPreferredOnChangeEventDepth(self: *const SaxLowerer, component_name: []const u8, depth: usize) ?[]const u8 {
+        if (depth > 8) return null;
+        const component = self.componentByName(component_name) orelse return null;
+        for (component.root_nodes) |root_idx| {
+            if (self.nodePreferredOnChangeEvent(component, root_idx, depth)) |event_name| return event_name;
+        }
+        return null;
+    }
+
+    fn nodePreferredOnChangeEvent(self: *const SaxLowerer, component: parser.Component, node_idx: usize, depth: usize) ?[]const u8 {
+        const node = component.dom_nodes[node_idx];
+        if (std.mem.eql(u8, node.tag, "textarea")) return "input";
+        if (std.mem.eql(u8, node.tag, "select")) return "change";
+        if (std.mem.eql(u8, node.tag, "input")) {
+            const input_type = attrLiteralValue(node, "type") orelse "text";
+            return if (inputTypeUsesNativeChange(input_type)) "change" else "input";
+        }
+        if (node.is_user_component) {
+            if (self.componentPreferredOnChangeEventDepth(node.tag, depth + 1)) |event_name| return event_name;
+        }
+        for (node.children) |child| {
+            switch (child) {
+                .node_index => |child_idx| if (self.nodePreferredOnChangeEvent(component, child_idx, depth)) |event_name| return event_name,
+                else => {},
+            }
+        }
+        return null;
     }
 
     fn isContextPropListDelimiter(c: u8) bool {
@@ -1369,11 +1413,8 @@ pub const SaxLowerer = struct {
         defer self.allocator.free(true_const);
         const false_const = try std.fmt.allocPrint(self.allocator, "sax_{s}_{d}", .{ self.component.name, false_idx });
         defer self.allocator.free(false_const);
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const dst_name = try std.fmt.allocPrint(self.allocator, "{s}_bool_dst_{d}", .{ prefix, idx });
         defer self.allocator.free(dst_name);
         try out.writer().print("  {s} = ptr_add {s}, {s}\n", .{ dst_name, buf_name, len_name });
@@ -1474,11 +1515,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const slot_name = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(slot_name);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_value_ternary_cond_{d}", .{ prefix, idx });
@@ -1519,11 +1557,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_i64_ternary_cond_{d}", .{ prefix, idx });
@@ -1585,11 +1620,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_i32_ternary_cond_{d}", .{ prefix, idx });
@@ -1657,11 +1689,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_f64_ternary_cond_{d}", .{ prefix, idx });
@@ -1723,11 +1752,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_i1_ternary_cond_{d}", .{ prefix, idx });
@@ -1780,11 +1806,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const quote_idx = try self.string_pool.add("\"");
@@ -1847,11 +1870,8 @@ pub const SaxLowerer = struct {
         defer self.allocator.free(true_const);
         const false_const = try std.fmt.allocPrint(self.allocator, "sax_{s}_{d}", .{ self.component.name, false_idx });
         defer self.allocator.free(false_const);
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const dst_name = try std.fmt.allocPrint(self.allocator, "{s}_json_key_bool_dst_{d}", .{ prefix, idx });
         defer self.allocator.free(dst_name);
         try out.writer().print("  {s} = ptr_add {s}, {s}\n", .{ dst_name, buf_name, len_name });
@@ -1875,11 +1895,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const quote_idx = try self.string_pool.add("\"");
@@ -1942,11 +1959,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_key_i1_ternary_cond_{d}", .{ prefix, idx });
@@ -1981,11 +1995,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const cond_slot = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(cond_slot);
         const quote_idx = try self.string_pool.add("\"");
@@ -2048,11 +2059,8 @@ pub const SaxLowerer = struct {
         defer self.allocator.free(true_const);
         const false_const = try std.fmt.allocPrint(self.allocator, "sax_{s}_{d}", .{ self.component.name, false_idx });
         defer self.allocator.free(false_const);
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const slot_name = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(slot_name);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_key_ternary_cond_{d}", .{ prefix, idx });
@@ -2095,11 +2103,8 @@ pub const SaxLowerer = struct {
         defer self.allocator.free(false_slice.ptr_name);
         defer self.allocator.free(false_slice.len_name);
 
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const slot_name = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(slot_name);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_key_ptr_ternary_cond_{d}", .{ prefix, idx });
@@ -2192,11 +2197,8 @@ pub const SaxLowerer = struct {
         prefix: []const u8,
         idx: usize,
     ) !void {
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const slot_name = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(slot_name);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_key_mixed_ternary_cond_{d}", .{ prefix, idx });
@@ -2420,11 +2422,8 @@ pub const SaxLowerer = struct {
         defer self.allocator.free(false_slice.ptr_name);
         defer self.allocator.free(false_slice.len_name);
 
-        const label_prefix = try self.allocator.dupe(u8, prefix);
+        const label_prefix = try self.allocLabelPrefix(prefix);
         defer self.allocator.free(label_prefix);
-        for (label_prefix) |*c| {
-            if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-        }
         const slot_name = try self.stateSlotConstName(ternary.condition_name);
         defer self.allocator.free(slot_name);
         const cond_name = try std.fmt.allocPrint(self.allocator, "{s}_json_obj_ternary_cond_{d}", .{ prefix, idx });
@@ -2483,11 +2482,8 @@ pub const SaxLowerer = struct {
                 const tail_idx = if (txt.len > 1) try self.string_pool.add(txt[1..]) else 0;
                 const tail_const = if (txt.len > 1) try std.fmt.allocPrint(self.allocator, "sax_{s}_{d}", .{ self.component.name, tail_idx }) else try self.allocator.dupe(u8, "");
                 defer self.allocator.free(tail_const);
-                const label_prefix = try self.allocator.dupe(u8, prefix);
+                const label_prefix = try self.allocLabelPrefix(prefix);
                 defer self.allocator.free(label_prefix);
-                for (label_prefix) |*c| {
-                    if (!std.ascii.isAlphanumeric(c.*) and c.* != '_') c.* = '_';
-                }
                 const has_members_name = try std.fmt.allocPrint(self.allocator, "{s}_json_obj_has_members_{d}", .{ prefix, idx });
                 defer self.allocator.free(has_members_name);
                 const comma_dst_name = try std.fmt.allocPrint(self.allocator, "{s}_comma_dst_{d}", .{ prefix, idx });
@@ -2857,11 +2853,13 @@ pub const SaxLowerer = struct {
     ) !void {
         const bool_name = try std.fmt.allocPrint(self.allocator, "{s}_ternary_bool_{d}", .{ prefix, idx });
         defer self.allocator.free(bool_name);
-        const true_label = try std.fmt.allocPrint(self.allocator, "L_{s}_TERNARY_TRUE_{d}", .{ prefix, idx });
+        const label_prefix = try self.allocLabelPrefix(prefix);
+        defer self.allocator.free(label_prefix);
+        const true_label = try std.fmt.allocPrint(self.allocator, "L_{s}_TERNARY_TRUE_{d}", .{ label_prefix, idx });
         defer self.allocator.free(true_label);
-        const false_label = try std.fmt.allocPrint(self.allocator, "L_{s}_TERNARY_FALSE_{d}", .{ prefix, idx });
+        const false_label = try std.fmt.allocPrint(self.allocator, "L_{s}_TERNARY_FALSE_{d}", .{ label_prefix, idx });
         defer self.allocator.free(false_label);
-        const done_label = try std.fmt.allocPrint(self.allocator, "L_{s}_TERNARY_DONE_{d}", .{ prefix, idx });
+        const done_label = try std.fmt.allocPrint(self.allocator, "L_{s}_TERNARY_DONE_{d}", .{ label_prefix, idx });
         defer self.allocator.free(done_label);
         const dst_name = try std.fmt.allocPrint(self.allocator, "{s}_ternary_dst_{d}", .{ prefix, idx });
         defer self.allocator.free(dst_name);
@@ -4630,6 +4628,29 @@ pub const SaxLowerer = struct {
         return true;
     }
 
+    fn emitUserComponentStaticStringTernaryProp(
+        self: *SaxLowerer,
+        out: *std.ArrayList(u8),
+        node: parser.DomNode,
+        ctx_var: []const u8,
+        target_prop_name: []const u8,
+        ternary: StaticStringTernary,
+        attr_idx: usize,
+    ) !void {
+        const setter = try self.componentStringStateSetterName(node.tag, target_prop_name);
+        defer self.allocator.free(setter);
+        const prefix = try std.fmt.allocPrint(self.allocator, "prop_str_ternary_{s}_{d}", .{ node.alias, attr_idx });
+        defer self.allocator.free(prefix);
+        const buf_name = try std.fmt.allocPrint(self.allocator, "{s}_buf", .{prefix});
+        defer self.allocator.free(buf_name);
+        const len_name = try std.fmt.allocPrint(self.allocator, "{s}_len", .{prefix});
+        defer self.allocator.free(len_name);
+        try out.writer().print("  {s} = stack_alloc {}\n", .{ buf_name, @max(@max(ternary.true_text.len, ternary.false_text.len), 1) });
+        try out.writer().print("  {s} = 0\n", .{len_name});
+        try self.emitStaticStringTernaryCopy(out, ternary, buf_name, len_name, prefix, 0);
+        try out.writer().print("  call @{s}({s}, *{s}, {s})\n", .{ setter, ctx_var, buf_name, len_name });
+    }
+
     fn emitUserComponentProps(self: *SaxLowerer, out: *std.ArrayList(u8), node: parser.DomNode, ctx_var: []const u8) !void {
         for (node.attrs, 0..) |attr, idx| {
             if (attr.is_event) continue;
@@ -4666,17 +4687,23 @@ pub const SaxLowerer = struct {
                 },
                 .interpolation => |expr| {
                     if (target_state.ty == .ptr) {
-                        const source_state_name = simpleStateExprName(expr) orelse continue;
-                        const source_state = self.stateVar(source_state_name) orelse continue;
-                        if (source_state.ty != .ptr) continue;
-                        const setter = try self.componentStringStateSetterName(node.tag, target_prop.name);
-                        defer self.allocator.free(setter);
-                        const prefix = try std.fmt.allocPrint(self.allocator, "prop_str_{s}_{d}", .{ node.alias, idx });
-                        defer self.allocator.free(prefix);
-                        const slice = try self.emitLoadStateStringSlice(out, source_state_name, prefix);
-                        defer self.allocator.free(slice.ptr_name);
-                        defer self.allocator.free(slice.len_name);
-                        try out.writer().print("  call @{s}({s}, *{s}, {s})\n", .{ setter, ctx_var, slice.ptr_name, slice.len_name });
+                        if (simpleStateExprName(expr)) |source_state_name| {
+                            const source_state = self.stateVar(source_state_name) orelse continue;
+                            if (source_state.ty != .ptr) continue;
+                            const setter = try self.componentStringStateSetterName(node.tag, target_prop.name);
+                            defer self.allocator.free(setter);
+                            const prefix = try std.fmt.allocPrint(self.allocator, "prop_str_{s}_{d}", .{ node.alias, idx });
+                            defer self.allocator.free(prefix);
+                            const slice = try self.emitLoadStateStringSlice(out, source_state_name, prefix);
+                            defer self.allocator.free(slice.ptr_name);
+                            defer self.allocator.free(slice.len_name);
+                            try out.writer().print("  call @{s}({s}, *{s}, {s})\n", .{ setter, ctx_var, slice.ptr_name, slice.len_name });
+                            continue;
+                        }
+                        if (self.parseStaticStringTernary(expr)) |ternary| {
+                            try self.emitUserComponentStaticStringTernaryProp(out, node, ctx_var, target_prop.name, ternary, idx);
+                            continue;
+                        }
                         continue;
                     }
                     var expr_arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -4856,8 +4883,12 @@ pub const SaxLowerer = struct {
 
             const base_attr = eventBaseAttrName(attr.name);
             if (std.mem.eql(u8, base_attr, "onchange")) {
-                try self.emitUserComponentEventBinding(out, root_var, attr, "input", handler_name, owner_ctx_var);
-                try self.emitUserComponentEventBinding(out, root_var, attr, "change", handler_name, owner_ctx_var);
+                if (self.componentPreferredOnChangeEvent(node.tag)) |event_name| {
+                    try self.emitUserComponentEventBinding(out, root_var, attr, event_name, handler_name, owner_ctx_var);
+                } else {
+                    try self.emitUserComponentEventBinding(out, root_var, attr, "input", handler_name, owner_ctx_var);
+                    try self.emitUserComponentEventBinding(out, root_var, attr, "change", handler_name, owner_ctx_var);
+                }
                 continue;
             }
 
@@ -5096,9 +5127,11 @@ pub const SaxLowerer = struct {
                         if (value.ty != .i64) return LowerError.InvalidInterpolation;
                         const bool_name = try std.fmt.allocPrint(self.allocator, "autofocus_{s}", .{node_var});
                         defer self.allocator.free(bool_name);
-                        const focus_label = try std.fmt.allocPrint(self.allocator, "L_AUTOFOCUS_{s}", .{node_var});
+                        const label_prefix = try self.allocLabelPrefix(node_var);
+                        defer self.allocator.free(label_prefix);
+                        const focus_label = try std.fmt.allocPrint(self.allocator, "L_AUTOFOCUS_{s}", .{label_prefix});
                         defer self.allocator.free(focus_label);
-                        const done_label = try std.fmt.allocPrint(self.allocator, "L_AUTOFOCUS_DONE_{s}", .{node_var});
+                        const done_label = try std.fmt.allocPrint(self.allocator, "L_AUTOFOCUS_DONE_{s}", .{label_prefix});
                         defer self.allocator.free(done_label);
                         try out.writer().print("  {s} = ne {s}, 0\n", .{ bool_name, value.name });
                         try out.writer().print("  br {s} -> {s}, {s}\n", .{ bool_name, focus_label, done_label });
@@ -6829,6 +6862,49 @@ test "lowerer forwards user component event props to component roots" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"sax_app_changed\""));
 }
 
+test "lowerer normalizes user component onChange from internal form controls" {
+    const source =
+        \\<Component name="App">
+        \\  <state>
+        \\    count = 0
+        \\  </state>
+        \\  <CheckAction onChange={changed} />
+        \\  <TextAction onChange={changed} />
+        \\  @changed:
+        \\  L_ENTRY:
+        \\    count = load state+App_count as i64
+        \\    count = add count, 1
+        \\    store state+App_count, count as i64
+        \\    call @render()
+        \\    ret
+        \\  !count
+        \\</Component>
+        \\<Component name="CheckAction">
+        \\  <span><input type="checkbox" /></span>
+        \\</Component>
+        \\<Component name="TextAction">
+        \\  <span><input type="text" /></span>
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+
+    for (program.components, 0..) |component, idx| {
+        var component_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, component);
+        defer component_lowerer.deinit();
+        try component_lowerer.lower(&out, .{ .emit_shared_decls = idx == 0 });
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, out.items, "call @sax_dom_bind_event("));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"change\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"input\""));
+}
+
 test "lowerer projects slot context props before explicit child props" {
     const source =
         \\<Component name="App">
@@ -6996,6 +7072,48 @@ test "lowerer emits numeric prop setter calls for user components" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_badge_set_count(node_0,"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_badge_set_active(node_0, 1)"));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "sax_badge_set_title") == null);
+}
+
+test "lowerer emits ternary string prop setter calls for user components" {
+    const source =
+        \\<Component name="App">
+        \\  <state>
+        \\    visible = 0 as i1
+        \\  </state>
+        \\  <Field type={visible ? 'text' : 'password'} />
+        \\  @toggle:
+        \\  L_ENTRY:
+        \\    store state+App_visible, 1 as i1
+        \\    call @render()
+        \\    ret
+        \\  !visible
+        \\</Component>
+        \\<Component name="Field">
+        \\  <state>
+        \\    type = 'text' as ptr
+        \\    type_len = 4
+        \\  </state>
+        \\  <input type={type} />
+        \\  !type !type_len
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, program.components[0]);
+    defer lowerer.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    try lowerer.lower(&out, .{});
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 2, "call @sax_field_set_type_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "prop_str_ternary"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " = stack_alloc 8"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"password\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"text\""));
 }
 
 test "lowerer maps normalized React prop aliases into user component state" {
@@ -7516,7 +7634,8 @@ test "lowerer emits static string ternary pieces inside DOM attr templates" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "attr_tpl_node_0_class_buf = stack_alloc"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " = load state+ClassLab_disabled as i1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "_TERNARY_TRUE_"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "jmp L_attr_tpl_node_0_class_TERNARY_DONE_1"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "jmp L_attr_tpl_node_0_class_"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "_TERNARY_DONE_1"));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "br ->") == null);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\" Mui-disabled MuiButton-disabled\""));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"MuiButton-root\""));
