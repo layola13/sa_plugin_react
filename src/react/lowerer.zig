@@ -1290,6 +1290,34 @@ pub const SaxLowerer = struct {
         try out.writer().writeByte('\n');
     }
 
+    fn appendComponentForwardDecls(self: *const SaxLowerer, out: *std.ArrayList(u8)) !void {
+        for (self.program_components) |component| {
+            const stem = try self.componentExportStem(component.name);
+            defer self.allocator.free(stem);
+            try out.writer().print("@extern sax_{s}_init() -> ptr\n", .{stem});
+            try out.writer().print("@extern sax_{s}_mount(parent_h: i64) -> ptr\n", .{stem});
+            try out.writer().print("@extern sax_{s}_slot(ctx: ptr) -> i64\n", .{stem});
+            try out.writer().print("@extern sax_{s}_root(ctx: ptr) -> i64\n", .{stem});
+            try out.writer().print("@extern sax_{s}_render(ctx: ptr) -> void\n", .{stem});
+            try out.writer().print("@extern sax_{s}_destroy(ctx: ptr) -> void\n", .{stem});
+            for (component.state_vars) |sv| {
+                switch (sv.ty) {
+                    .ptr => {
+                        const string_setter_name = try self.componentStringStateSetterName(component.name, sv.name);
+                        defer self.allocator.free(string_setter_name);
+                        try out.writer().print("@extern {s}(ctx: ptr, *value: ptr, value_len: i64) -> void\n", .{string_setter_name});
+                    },
+                    else => {
+                        const setter_name = try self.componentStateSetterName(component.name, sv.name);
+                        defer self.allocator.free(setter_name);
+                        try out.writer().print("@extern {s}(ctx: ptr, value: {s}) -> void\n", .{ setter_name, stateTypeName(sv.ty) });
+                    },
+                }
+            }
+        }
+        if (self.program_components.len != 0) try out.writer().writeByte('\n');
+    }
+
     fn appendStdImports(_: *const SaxLowerer, out: *std.ArrayList(u8)) !void {
         try out.writer().writeAll("@import \"sa_std/vec.sa\"\n\n");
     }
@@ -6190,6 +6218,7 @@ pub const SaxLowerer = struct {
 
         if (options.emit_shared_decls) {
             try self.appendExternDecls(out);
+            try self.appendComponentForwardDecls(out);
             try self.appendStdImports(out);
             try self.appendArrayAdapter(out);
         }
@@ -9190,6 +9219,39 @@ test "lowerer binds React-style event handler references" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "@extern sax_event_meta_key() -> i1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "@extern sax_event_prevent_default() -> void"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "@extern sax_event_stop_propagation() -> void"));
+}
+
+test "lowerer keeps ptr state setter forward decls from colliding with handlers" {
+    const source =
+        \\<Component name="App">
+        \\  <state>
+        \\    status_fallback = alloc 64
+        \\    status_fallback_len = 0
+        \\  </state>
+        \\  <input value={status_fallback} onChange={set_status_fallback} />
+        \\  @set_status_fallback:
+        \\  L_ENTRY:
+        \\    call @render()
+        \\    ret
+        \\  !status_fallback !status_fallback_len
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, program.components[0]);
+    defer lowerer.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    try lowerer.lower(&out, .{});
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "@extern sax_app_set_status_fallback(ctx: ptr, value: ptr, value_len: i64) -> void") == null);
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "@extern sax_app_set_status_fallback_str(ctx: ptr, *value: ptr, value_len: i64) -> void"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "@export sax_app_set_status_fallback(ctx: ptr):"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_bind_event(node_0,"));
 }
 
 test "lowerer binds React capture event handlers with DOM event names" {
