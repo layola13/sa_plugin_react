@@ -8,17 +8,51 @@ const sax_build = @import("react/build.zig");
 pub const ReactArtifacts = struct {
     root_name: []u8,
     sa_code: std.ArrayList(u8),
+    shared_sa_code: std.ArrayList(u8),
+    component_sa_codes: std.ArrayList(std.ArrayList(u8)),
     airlock_js: std.ArrayList(u8),
     index_html: std.ArrayList(u8),
 
     pub fn deinit(self: *ReactArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.root_name);
         self.sa_code.deinit();
+        self.shared_sa_code.deinit();
+        for (self.component_sa_codes.items) |*code| code.deinit();
+        self.component_sa_codes.deinit();
         self.airlock_js.deinit();
         self.index_html.deinit();
         self.* = undefined;
     }
 };
+
+pub const SourceUnit = sax_build.SourceUnit;
+
+fn appendComponentSansExternBlock(out: *std.ArrayList(u8), text: []const u8) !void {
+    var cursor: usize = 0;
+    var in_extern_block = false;
+    while (cursor < text.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, text, cursor, '\n') orelse text.len;
+        const next_cursor = if (line_end < text.len) line_end + 1 else text.len;
+        const line = std.mem.trimRight(u8, text[cursor..line_end], "\r");
+
+        if (!in_extern_block) {
+            if (std.mem.startsWith(u8, line, "@extern ")) {
+                in_extern_block = true;
+            } else {
+                try out.appendSlice(text[cursor..next_cursor]);
+            }
+        } else {
+            if (line.len == 0 or std.mem.startsWith(u8, line, "@extern ")) {
+                cursor = next_cursor;
+                continue;
+            }
+            try out.appendSlice(text[cursor..]);
+            return;
+        }
+
+        cursor = next_cursor;
+    }
+}
 
 fn sourceStem(path: []const u8) []const u8 {
     const basename = std.fs.path.basename(path);
@@ -202,19 +236,44 @@ pub fn compileBrowserArtifacts(
     const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
     defer allocator.free(reachable_components);
 
+    var shared_sa_code = std.ArrayList(u8).init(allocator);
+    errdefer shared_sa_code.deinit();
+
+    var root_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, program.components[0]);
+    defer root_lowerer.deinit();
+    root_lowerer.lower(&shared_sa_code, .{ .shared_decls = .runtime_only, .emit_app_alias = true }) catch |err| {
+        try stderr.print("error[SA-REACT-LOWER]: shared runtime for {s} failed: {s}\n", .{ program.components[0].name, @errorName(err) });
+        return err;
+    };
+
+    var component_sa_codes = std.ArrayList(std.ArrayList(u8)).init(allocator);
+    errdefer {
+        for (component_sa_codes.items) |*code| code.deinit();
+        component_sa_codes.deinit();
+    }
+
+    try sa_code.appendSlice(shared_sa_code.items);
+    if (sa_code.items.len != 0 and sa_code.items[sa_code.items.len - 1] != '\n') try sa_code.append('\n');
+
     for (reachable_components, 0..) |component, idx| {
+        var component_code = std.ArrayList(u8).init(allocator);
+        errdefer component_code.deinit();
+
         var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
         defer sax_lowerer.deinit();
-        sax_lowerer.lower(&sa_code, .{ .emit_shared_decls = idx == 0 }) catch |err| {
+        sax_lowerer.lower(&component_code, .{ .shared_decls = .component_externs }) catch |err| {
             try stderr.print("error[SA-REACT-LOWER]: component {s} failed: {s}\n", .{ component.name, @errorName(err) });
             return err;
         };
-        if (idx + 1 < reachable_components.len) try sa_code.writer().writeByte('\n');
+
+        if (idx != 0) try sa_code.writer().writeByte('\n');
+        try appendComponentSansExternBlock(&sa_code, component_code.items);
+        if (sa_code.items.len != 0 and sa_code.items[sa_code.items.len - 1] != '\n') try sa_code.append('\n');
+        try component_sa_codes.append(component_code);
     }
 
     const root_name = try lowercaseName(allocator, program.components[0].name);
     errdefer allocator.free(root_name);
-    try sa_code.writer().print("@export sax_app_init() -> ptr:\nL_ENTRY:\n  ctx = call @sax_{s}_init()\n  return ctx\n\n", .{root_name});
 
     var airlock_generator = airlock_gen.AirlockGenerator.init(allocator);
     const airlock_js = try airlock_generator.generateAirlockJS();
@@ -225,9 +284,50 @@ pub fn compileBrowserArtifacts(
     return .{
         .root_name = root_name,
         .sa_code = sa_code,
+        .shared_sa_code = shared_sa_code,
+        .component_sa_codes = component_sa_codes,
         .airlock_js = airlock_js,
         .index_html = index_html,
     };
+}
+
+pub fn sourceUnitsFromArtifacts(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    artifacts: *const ReactArtifacts,
+) !std.ArrayList(SourceUnit) {
+    var units = std.ArrayList(SourceUnit).init(allocator);
+    errdefer {
+        for (units.items) |unit| allocator.free(unit.logical_name);
+        units.deinit();
+    }
+
+    try units.append(.{
+        .logical_name = blk: {
+            const name = try allocator.dupe(u8, "shared");
+            errdefer allocator.free(name);
+            break :blk name;
+        },
+        .source_path = source_path,
+        .source_text = artifacts.shared_sa_code.items,
+    });
+
+    for (artifacts.component_sa_codes.items, 0..) |component_code, idx| {
+        const logical_name = try std.fmt.allocPrint(allocator, "component_{d}", .{idx});
+        errdefer allocator.free(logical_name);
+        try units.append(.{
+            .logical_name = logical_name,
+            .source_path = source_path,
+            .source_text = component_code.items,
+        });
+    }
+
+    return units;
+}
+
+pub fn freeSourceUnits(allocator: std.mem.Allocator, units: *std.ArrayList(SourceUnit)) void {
+    for (units.items) |unit| allocator.free(unit.logical_name);
+    units.deinit();
 }
 
 pub fn buildBrowserWasmFromSourceText(
@@ -240,6 +340,17 @@ pub fn buildBrowserWasmFromSourceText(
     stderr: anytype,
 ) !u8 {
     return sax_build.buildBrowserWasmFromSourceText(allocator, source_path, source_text, out_path, debug, optimization, .{ .jobs = 1, .dce = .full }, stderr);
+}
+
+pub fn buildBrowserWasmFromSourceUnits(
+    allocator: std.mem.Allocator,
+    units: []const SourceUnit,
+    out_path: []const u8,
+    debug: bool,
+    optimization: anytype,
+    stderr: anytype,
+) !u8 {
+    return sax_build.buildBrowserWasmFromSourceUnits(allocator, units, out_path, debug, optimization, .{ .jobs = 1, .dce = .full }, stderr);
 }
 
 test "react vite api resolves dev plugin include" {

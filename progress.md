@@ -178,6 +178,8 @@ Overall progress: 99.99999999999997%
 
 - Added generic mixed text-and-element DOM child lowering for React/SAX nodes. When a DOM element contains both text children and element children, such as `{title}<span />`, the lowerer now allocates stable text-node DOM slots, appends them in child order, and updates those text nodes during render instead of setting parent `textContent` and deleting sibling elements. The Node runtime verifier now supports `document.createTextNode`, and lowerer coverage locks the mixed child case. This keeps MUI `Tooltip` title/arrow behavior in the shared React/SAX layer rather than adding MUI-specific logic. Verification: `zig test src/react/lowerer.zig`, `zig build test -j1`, `zig build`, plus downstream MUI `sa react check/build` and Chromium browser verification.
 
+- Added generic provider-wrapped slot context detection for React/SAX component composition. When a wrapper component places its projected `<Slot />` under an internal provider component, the lowerer now uses that provider's effective `contextProps`/`contextScope` contract for the wrapper's slotted user-component children, so static provider composition matches the React/MUI shape without MUI-specific Zig logic. Verification: React `zig build test -j1` (234/234), downstream MUI `zig build test -j1`, MUI theme smoke `sa react build`, and Chromium `tools/verify_mui_theme_lab_browser.mjs`.
+
 - `sa version`
 - `zig test src/react/parser.zig`
 - `zig test src/react/lowerer.zig`

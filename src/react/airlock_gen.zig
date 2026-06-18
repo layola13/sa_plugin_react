@@ -28,7 +28,7 @@ pub const AirlockGenerator = struct {
         try output.writer().print("const SAX_WGPU_REQUIRED = {};\n", .{options.wgpu});
         try output.writer().print("const SAX_SA3D_REQUIRED = {};\n", .{options.sa3d});
 
-        const airlock_template =
+        const airlock_template_prefix =
             \\// airlock.js — SAX 自动生成，请勿手动修改
             \\// WASM ↔ DOM 胶水层（Airlock 气闸舱）
             \\
@@ -135,7 +135,7 @@ pub const AirlockGenerator = struct {
             \\  const prefix = String(Number(node_h)) + "::";
             \\  for (const [key, binding] of _bindingMap.entries()) {
             \\    if (key.startsWith(prefix)) {
-            \\      binding.node.removeEventListener(binding.evt, binding.listener, { capture: binding.capture });
+            \\      binding.target.removeEventListener(binding.evt, binding.listener, { capture: binding.capture });
             \\      _bindingMap.delete(key);
             \\    }
             \\  }
@@ -143,7 +143,27 @@ pub const AirlockGenerator = struct {
             \\function _bind_event(node_h, evt, handler, ctx, capture) {
             \\  const el = _get_node(node_h);
             \\  const useCapture = !!capture;
+            \\  const isClickAway = evt === "clickaway";
+            \\  const targetNode = isClickAway ? document : el;
+            \\  const effectiveCapture = isClickAway ? true : useCapture;
+            \\  if (!targetNode) return;
+            \\  let clickAwayArmed = !isClickAway;
+            \\  if (isClickAway) {
+            \\    queueMicrotask(() => {
+            \\      clickAwayArmed = true;
+            \\    });
+            \\  }
             \\  const listener = (event) => {
+            \\    if (isClickAway && !clickAwayArmed) {
+            \\      return;
+            \\    }
+            \\    const clickAwayHidden = !!(isClickAway && el && ((typeof el.matches === "function" && el.matches("[hidden]")) || (typeof el.closest === "function" && el.closest("[hidden]"))));
+            \\    if (clickAwayHidden) {
+            \\      return;
+            \\    }
+            \\    if (isClickAway && el && event?.target && typeof el.contains === "function" && el.contains(event.target)) {
+            \\      return;
+            \\    }
             \\    if (_wasm_instance && _wasm_instance.exports[handler]) {
             \\      const prev = _current_event;
             \\      const prev_target = _current_event_target;
@@ -163,10 +183,10 @@ pub const AirlockGenerator = struct {
             \\  const key = `${Number(node_h)}::${evt}::${handler}::${ctx}::${useCapture ? 1 : 0}`;
             \\  const prev = _bindingMap.get(key);
             \\  if (prev) {
-            \\    prev.node.removeEventListener(prev.evt, prev.listener, { capture: prev.capture });
+            \\    prev.target.removeEventListener(prev.evt, prev.listener, { capture: prev.capture });
             \\  }
-            \\  el.addEventListener(evt, listener, { capture: useCapture });
-            \\  _bindingMap.set(key, { node: el, evt, listener, capture: useCapture });
+            \\  targetNode.addEventListener(isClickAway ? "click" : evt, listener, { capture: effectiveCapture });
+            \\  _bindingMap.set(key, { node: el, target: targetNode, evt: isClickAway ? "click" : evt, listener, capture: effectiveCapture });
             \\}
             \\function _has_disallowed_url_value(key, val) {
             \\  if (key === "ping") {
@@ -748,7 +768,7 @@ pub const AirlockGenerator = struct {
             \\    const key = `${Number(node_h)}::${evt}::${handler}::${ctx}::0`;
             \\    const binding = _bindingMap.get(key);
             \\    if (binding) {
-            \\      binding.node.removeEventListener(binding.evt, binding.listener, { capture: binding.capture });
+            \\      binding.target.removeEventListener(binding.evt, binding.listener, { capture: binding.capture });
             \\      _bindingMap.delete(key);
             \\    }
             \\  },
@@ -896,24 +916,9 @@ pub const AirlockGenerator = struct {
             \\  return _get_node(h);
             \\}
             \\
-            \\async function _load_wgpu_airlock() {
-            \\  if (!SAX_WGPU_REQUIRED) return null;
-            \\  const mod = await import("./wgpu_airlock.js");
-            \\  if (!mod.sax_wgpu_airlock || !mod.sax_wgpu_bind_wasm) {
-            \\    throw new Error("wgpu_airlock.js does not expose the SAX WGPU broker surface");
-            \\  }
-            \\  return mod;
-            \\}
-            \\
-            \\async function _load_sa3d_airlock() {
-            \\  if (!SAX_SA3D_REQUIRED) return null;
-            \\  const mod = await import("./sa3d_airlock.js");
-            \\  if (!mod.sax_sa3d_airlock || !mod.sax_sa3d_bind_wasm) {
-            \\    throw new Error("sa3d_airlock.js does not expose the SAX SA3D broker surface");
-            \\  }
-            \\  return mod;
-            \\}
-            \\
+        ;
+
+        const airlock_template_suffix =
             \\// ── WASM 加载入口
             \\let _wasm_instance;
             \\export async function sax_init(wasm_url) {
@@ -955,7 +960,49 @@ pub const AirlockGenerator = struct {
             \\}
         ;
 
-        try output.appendSlice(airlock_template);
+        try output.appendSlice(airlock_template_prefix);
+
+        if (options.wgpu) {
+            try output.appendSlice(
+                \\async function _load_wgpu_airlock() {
+                \\  const mod = await import("./wgpu_airlock.js");
+                \\  if (!mod.sax_wgpu_airlock || !mod.sax_wgpu_bind_wasm) {
+                \\    throw new Error("wgpu_airlock.js does not expose the SAX WGPU broker surface");
+                \\  }
+                \\  return mod;
+                \\}
+                \\
+            );
+        } else {
+            try output.appendSlice(
+                \\async function _load_wgpu_airlock() {
+                \\  return null;
+                \\}
+                \\
+            );
+        }
+
+        if (options.sa3d) {
+            try output.appendSlice(
+                \\async function _load_sa3d_airlock() {
+                \\  const mod = await import("./sa3d_airlock.js");
+                \\  if (!mod.sax_sa3d_airlock || !mod.sax_sa3d_bind_wasm) {
+                \\    throw new Error("sa3d_airlock.js does not expose the SAX SA3D broker surface");
+                \\  }
+                \\  return mod;
+                \\}
+                \\
+            );
+        } else {
+            try output.appendSlice(
+                \\async function _load_sa3d_airlock() {
+                \\  return null;
+                \\}
+                \\
+            );
+        }
+
+        try output.appendSlice(airlock_template_suffix);
         return output;
     }
 
@@ -1016,7 +1063,16 @@ test "airlock generator emits the documented bridge surface" {
     try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "sax_dom_focus(node_h)"));
     try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "sax_dom_bind_event(node_h, evt_ptr, evt_len, handler_ptr, handler_len, ctx)"));
     try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "sax_dom_bind_event_capture(node_h, evt_ptr, evt_len, handler_ptr, handler_len, ctx)"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "el.addEventListener(evt, listener, { capture: useCapture })"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "const isClickAway = evt === \"clickaway\";"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "const targetNode = isClickAway ? document : el;"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "const effectiveCapture = isClickAway ? true : useCapture;"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "let clickAwayArmed = !isClickAway;"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "queueMicrotask(() => {"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "if (isClickAway && !clickAwayArmed) {"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "const clickAwayHidden = !!(isClickAway && el"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "if (clickAwayHidden) {"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "el.contains(event.target)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "targetNode.addEventListener(isClickAway ? \"click\" : evt, listener, { capture: effectiveCapture });"));
     try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "_current_event_current_target = el"));
     try std.testing.expect(std.mem.containsAtLeast(u8, js.items, 1, "const target = _event_current_target();"));
     try std.testing.expect(std.mem.indexOf(u8, js.items, "_current_event.currentTarget = el") == null);

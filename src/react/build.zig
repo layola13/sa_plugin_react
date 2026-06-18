@@ -69,7 +69,7 @@ const TestDriver = struct {
 
     pub fn argvForWasm(
         allocator: std.mem.Allocator,
-        artifact_path: []const u8,
+        artifact_paths: []const []const u8,
         out_path: []const u8,
         target: struct { triple: []const u8, no_entry: bool, import_symbols: bool = false, exports: []const []const u8 = &.{} },
         optimization: Optimization,
@@ -84,7 +84,8 @@ const TestDriver = struct {
             owned_args.deinit();
         }
 
-        try argv.appendSlice(&.{ "zig", "build-exe", artifact_path });
+        try argv.appendSlice(&.{ "zig", "build-exe" });
+        for (artifact_paths) |p| try argv.append(p);
         if (debug) {
             try argv.append("-g");
         }
@@ -127,7 +128,7 @@ const TestDriver = struct {
 
     pub fn compileWasm(
         allocator: std.mem.Allocator,
-        source_path: []const u8,
+        artifact_paths: []const []const u8,
         out_path: []const u8,
         options: struct { triple: []const u8, no_entry: bool, import_symbols: bool = false, exports: []const []const u8 = &.{} },
         optimization: Optimization,
@@ -135,7 +136,7 @@ const TestDriver = struct {
         stderr: anytype,
     ) !void {
         _ = allocator;
-        _ = source_path;
+        _ = artifact_paths;
         _ = options;
         _ = optimization;
         _ = debug;
@@ -239,6 +240,12 @@ const trap = @import("../common/trap.zig");
 pub const CompileOptions = struct {
     jobs: ?usize = null,
     dce: emit_options.DceMode = .std,
+};
+
+pub const SourceUnit = struct {
+    logical_name: []const u8,
+    source_path: []const u8,
+    source_text: []const u8,
 };
 
 pub const CompileOk = if (builtin.is_test) struct {
@@ -392,6 +399,34 @@ fn dupeWasmExports(allocator: std.mem.Allocator, source_text: []const u8) ![]con
         const export_name = try allocator.dupe(u8, name);
         errdefer allocator.free(export_name);
         try exports.append(export_name);
+    }
+
+    return try exports.toOwnedSlice();
+}
+
+fn dupeWasmExportsFromSourceUnits(allocator: std.mem.Allocator, units: []const SourceUnit) ![]const []const u8 {
+    var exports = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (exports.items) |name| allocator.free(name);
+        exports.deinit();
+    }
+
+    for (units) |unit| {
+        const unit_exports = try dupeWasmExports(allocator, unit.source_text);
+        defer freeWasmExports(allocator, unit_exports);
+
+        for (unit_exports) |name| {
+            var found = false;
+            for (exports.items) |existing| {
+                if (std.mem.eql(u8, existing, name)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                try exports.append(try allocator.dupe(u8, name));
+            }
+        }
     }
 
     return try exports.toOwnedSlice();
@@ -599,12 +634,88 @@ pub fn buildBrowserWasmFromSourceText(
             var owned = ok;
             defer owned.deinit(allocator);
 
-            try ensureParentDir(artifact_path);
-            try emit_llvm_llvmc.emitLlvmcToFile(allocator, owned.verified, &owned.flat.def_dict, owned.flat.loc_table, source_path, 32, .{ .debug = debug, .wasm_compat = true, .jobs = options.jobs, .dce = options.dce, .std_root = std_root }, artifact_path);
+            const stable_hash = try getBrowserWasmIncrementalCacheKey(allocator, debug, optimization, options.dce, exports, std_root);
+            var stable_hash_hex: [64]u8 = undefined;
+            _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&stable_hash)}) catch unreachable;
 
+            const fn_cache_dir = try std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-browser-wasm-incremental", &stable_hash_hex });
+            defer allocator.free(fn_cache_dir);
+
+            var bitcode_paths = std.ArrayList([]const u8).init(allocator);
+            defer {
+                for (bitcode_paths.items) |p| allocator.free(p);
+                bitcode_paths.deinit();
+            }
+
+            var sig_index: usize = 0;
+            var idx: usize = 0;
+            var task_idx: usize = 0;
+            while (idx < owned.verified.annotated.len) : (idx += 1) {
+                const item = owned.verified.annotated[idx].base;
+                switch (item.kind) {
+                    .func_decl, .ffi_wrapper_decl, .extern_decl, .export_decl, .test_decl => {
+                        if (sig_index >= owned.verified.function_sigs.len) return error.UnknownFunction;
+                        const current_sig_index = sig_index;
+                        sig_index += 1;
+
+                        var end = idx + 1;
+                        while (end < owned.verified.annotated.len and switch (owned.verified.annotated[end].base.kind) {
+                            .func_decl, .ffi_wrapper_decl, .extern_decl, .export_decl, .test_decl => false,
+                            else => true,
+                        }) : (end += 1) {}
+
+                        if (item.kind != .extern_decl) {
+                            const function_key = try computeFunctionObjectKey(allocator, source_path, &owned.verified, current_sig_index, idx, end);
+                            defer allocator.free(function_key);
+
+                            const func_bc_path = try std.fmt.allocPrint(allocator, "{s}/functions/{s}.sa.bc", .{ fn_cache_dir, function_key });
+                            errdefer allocator.free(func_bc_path);
+
+                            if (!filePresentNonEmpty(func_bc_path)) {
+                                try ensureParentDir(func_bc_path);
+                                const opt_level = switch (optimization) {
+                                    .release_small => @as(u8, 1),
+                                    .release_fast => @as(u8, 3),
+                                    else => @as(u8, 0),
+                                };
+                                try emit_llvm_llvmc.emitLlvmcToFile(
+                                    allocator,
+                                    owned.verified,
+                                    &owned.flat.def_dict,
+                                    owned.flat.loc_table,
+                                    source_path,
+                                    32,
+                                    emit_options.EmitOptions{
+                                        .debug = debug,
+                                        .wasm_compat = true,
+                                        .jobs = 1,
+                                        .opt_level = opt_level,
+                                        .function_task_index = task_idx,
+                                        .dce = options.dce,
+                                        .std_root = std_root,
+                                    },
+                                    func_bc_path,
+                                );
+                            }
+
+                            try bitcode_paths.append(func_bc_path);
+                        }
+
+                        task_idx += 1;
+                        idx = end - 1;
+                    },
+                    else => {},
+                }
+            }
+
+            if (bitcode_paths.items.len == 0) {
+                return error.UnknownFunction;
+            }
+
+            try ensureParentDir(artifact_path);
             driver.compileWasm(
                 allocator,
-                artifact_path,
+                bitcode_paths.items,
                 out_path,
                 .{ .triple = "wasm32-freestanding", .no_entry = true, .import_symbols = true, .exports = exports },
                 optimization,
@@ -619,7 +730,7 @@ pub fn buildBrowserWasmFromSourceText(
                 if (dir.len != 0) std.fs.cwd().makePath(dir) catch {};
             }
             std.fs.cwd().copyFile(out_path, std.fs.cwd(), cached_wasm, .{}) catch {};
-            std.fs.cwd().copyFile(artifact_path, std.fs.cwd(), cached_bc, .{}) catch {};
+            std.fs.cwd().copyFile(bitcode_paths.items[0], std.fs.cwd(), cached_bc, .{}) catch {};
 
             const cached_manifest = std.fs.path.join(allocator, &.{ cache_dir, "manifest.json" }) catch null;
             if (cached_manifest) |man_path| {
@@ -642,6 +753,273 @@ pub fn buildBrowserWasmFromSourceText(
             return 0;
         },
     }
+}
+
+fn getBrowserWasmSourceUnitsCacheKey(
+    allocator: std.mem.Allocator,
+    units: []const SourceUnit,
+    debug: bool,
+    optimization: anytype,
+    dce: emit_options.DceMode,
+    exports: []const []const u8,
+    std_root: []const u8,
+) ![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("sa-plugin-browser-wasm-source-units-cache-v1");
+    hasher.update(&[_]u8{0});
+    hasher.update(build_options.repo_root);
+    hasher.update(&[_]u8{0});
+    try hashRuntimeBuildInputs(allocator, &hasher);
+    hasher.update(std_root);
+    hasher.update(&[_]u8{0});
+    try hashSaStdTree(allocator, &hasher, std_root);
+    hasher.update(if (debug) "\x01" else "\x00");
+    hasher.update(&[_]u8{0});
+    hasher.update(@tagName(optimization));
+    hasher.update(&[_]u8{0});
+    hasher.update(dce.name());
+    hasher.update(&[_]u8{0});
+    for (units) |unit| {
+        hasher.update(unit.logical_name);
+        hasher.update(&[_]u8{0});
+        hasher.update(unit.source_text);
+        hasher.update(&[_]u8{0});
+    }
+    for (exports) |exp| {
+        hasher.update(exp);
+        hasher.update(&[_]u8{0});
+    }
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
+}
+
+fn computeSourceUnitObjectKey(
+    allocator: std.mem.Allocator,
+    unit: SourceUnit,
+) ![]const u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("sa-build-wasm-source-unit-cache-v1");
+    hasher.update(unit.logical_name);
+    hasher.update(&[_]u8{0});
+    hasher.update(unit.source_text);
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&out)});
+}
+
+pub fn buildBrowserWasmFromSourceUnits(
+    allocator: std.mem.Allocator,
+    units: []const SourceUnit,
+    out_path: []const u8,
+    debug: bool,
+    optimization: anytype,
+    options: CompileOptions,
+    stderr: anytype,
+) !u8 {
+    if (builtin.is_test) {
+        try writeTestWasm(out_path);
+        return 0;
+    }
+
+    if (units.len == 0) return error.UnknownFunction;
+
+    const exports = dupeWasmExportsFromSourceUnits(allocator, units) catch |err| {
+        try stderr.print("error[SAX-CACHE-EXPORTS]: failed to extract exports: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer freeWasmExports(allocator, exports);
+
+    const std_root = stdRootFromEnv(allocator) catch |err| {
+        try stderr.print("error[SAX-CACHE-STD]: failed to resolve std root: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(std_root);
+
+    const hash = getBrowserWasmSourceUnitsCacheKey(allocator, units, debug, optimization, options.dce, exports, std_root) catch |err| {
+        try stderr.print("error[SAX-CACHE-HASH]: failed to compute cache key: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    var hash_hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+
+    const project_root = projectRootFromSourcePath(allocator, units[0].source_path) catch |err| {
+        try stderr.print("error[SAX-CACHE-ROOT]: failed to find project root: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(project_root);
+
+    const cache_dir = std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-browser-wasm-units", &hash_hex }) catch |err| {
+        try stderr.print("error[SAX-CACHE-PATH]: failed to join cache dir path: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(cache_dir);
+
+    const cached_wasm = std.fs.path.join(allocator, &.{ cache_dir, "output.wasm" }) catch |err| {
+        try stderr.print("error[SAX-CACHE-PATH]: failed to join cached wasm path: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    defer allocator.free(cached_wasm);
+
+    if (filePresentNonEmpty(cached_wasm)) {
+        copyFile(cached_wasm, out_path) catch |err| {
+            try stderr.print("error[SAX-CACHE-COPY]: failed to copy cached wasm: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        try stderr.print("  [vite] browser wasm cache hit: {s}\n", .{hash_hex[0..12]});
+        return 0;
+    }
+
+    const stable_hash = try getBrowserWasmIncrementalCacheKey(allocator, debug, optimization, options.dce, exports, std_root);
+    var stable_hash_hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&stable_hash)}) catch unreachable;
+
+    const unit_cache_dir = try std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-browser-wasm-source-units", &stable_hash_hex });
+    defer allocator.free(unit_cache_dir);
+
+    var bitcode_paths = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (bitcode_paths.items) |p| allocator.free(p);
+        bitcode_paths.deinit();
+    }
+
+    const opt_level = switch (optimization) {
+        .release_small => @as(u8, 1),
+        .release_fast => @as(u8, 3),
+        else => @as(u8, 0),
+    };
+
+    for (units) |unit| {
+        const unit_key = try computeSourceUnitObjectKey(allocator, unit);
+        defer allocator.free(unit_key);
+
+        const unit_bc_path = try std.fmt.allocPrint(allocator, "{s}/units/{s}.sa.bc", .{ unit_cache_dir, unit_key });
+        errdefer allocator.free(unit_bc_path);
+
+        if (!filePresentNonEmpty(unit_bc_path)) {
+            const compiled = try compileSourceText(allocator, unit.source_path, unit.source_text, .{ .jobs = 1, .dce = options.dce });
+            switch (compiled) {
+                .trap => |report| {
+                    try printTrapReport(stderr, report);
+                    return 1;
+                },
+                .ok => |ok| {
+                    var owned = ok;
+                    defer owned.deinit(allocator);
+
+                    try ensureParentDir(unit_bc_path);
+                    try emit_llvm_llvmc.emitLlvmcToFile(
+                        allocator,
+                        owned.verified,
+                        &owned.flat.def_dict,
+                        owned.flat.loc_table,
+                        unit.source_path,
+                        32,
+                        .{ .debug = debug, .wasm_compat = true, .jobs = 1, .dce = options.dce, .std_root = std_root, .opt_level = opt_level },
+                        unit_bc_path,
+                    );
+                },
+            }
+        }
+
+        try bitcode_paths.append(unit_bc_path);
+    }
+
+    try ensureParentDir(out_path);
+    driver.compileWasm(
+        allocator,
+        bitcode_paths.items,
+        out_path,
+        .{ .triple = "wasm32-freestanding", .no_entry = true, .import_symbols = true, .exports = exports },
+        optimization,
+        debug,
+        stderr,
+    ) catch |err| switch (err) {
+        error.ChildProcessFailed => return 1,
+        else => return err,
+    };
+
+    if (std.fs.path.dirname(cached_wasm)) |dir| {
+        if (dir.len != 0) std.fs.cwd().makePath(dir) catch {};
+    }
+    std.fs.cwd().copyFile(out_path, std.fs.cwd(), cached_wasm, .{}) catch {};
+    return 0;
+}
+
+fn getBrowserWasmIncrementalCacheKey(
+    allocator: std.mem.Allocator,
+    debug: bool,
+    optimization: anytype,
+    dce: emit_options.DceMode,
+    exports: []const []const u8,
+    std_root: []const u8,
+) ![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("sa-plugin-browser-wasm-incremental-cache-v2");
+    hasher.update(&[_]u8{0});
+    hasher.update(build_options.repo_root);
+    hasher.update(&[_]u8{0});
+    try hashRuntimeBuildInputs(allocator, &hasher);
+    hasher.update(std_root);
+    hasher.update(&[_]u8{0});
+    try hashSaStdTree(allocator, &hasher, std_root);
+    hasher.update(if (debug) "\x01" else "\x00");
+    hasher.update(&[_]u8{0});
+    hasher.update(@tagName(optimization));
+    hasher.update(&[_]u8{0});
+    hasher.update(dce.name());
+    hasher.update(&[_]u8{0});
+    for (exports) |exp| {
+        hasher.update(exp);
+        hasher.update(&[_]u8{0});
+    }
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
+}
+
+fn computeFunctionObjectKey(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    verified: *const referee.VerifyOk,
+    sig_index: usize,
+    start_idx: usize,
+    end_idx: usize,
+) ![]const u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("sa-build-wasm-function-cache-v1");
+    hasher.update(source_path);
+    for (verified.function_sigs) |sig_item| {
+        hasher.update(sig_item.name);
+        if (sig_item.llvm_name) |name| {
+            hasher.update(name);
+        } else {
+            hasher.update("");
+        }
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &buf, sig_item.id, .little);
+        hasher.update(&buf);
+    }
+    for (verified.const_decls) |decl| {
+        hasher.update(decl.name);
+        hasher.update(decl.raw_text);
+    }
+    var sig_buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &sig_buf, sig_index, .little);
+    hasher.update(&sig_buf);
+    const current_sig = verified.function_sigs[sig_index];
+    hasher.update(current_sig.name);
+    if (current_sig.llvm_name) |name| {
+        hasher.update(name);
+    } else {
+        hasher.update("");
+    }
+    for (verified.annotated[start_idx..end_idx]) |item| {
+        hasher.update(item.base.raw_text);
+    }
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&out)});
 }
 
 fn getBrowserWasmCacheKey(
@@ -788,7 +1166,7 @@ fn writeAllFile(path: []const u8, bytes: []const u8) !void {
 }
 
 test "sax browser wasm build targets freestanding browser module" {
-    var argv = try TestDriver.argvForWasm(std.testing.allocator, "input.bc", "out.wasm", .{
+    var argv = try TestDriver.argvForWasm(std.testing.allocator, &.{"input.bc"}, "out.wasm", .{
         .triple = "wasm32-freestanding",
         .no_entry = true,
         .import_symbols = true,

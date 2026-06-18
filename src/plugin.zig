@@ -26,6 +26,8 @@ const SaxArtifacts = struct {
     component_name: []const u8,
     root_name: []u8,
     sa_code: std.ArrayList(u8),
+    shared_sa_code: ?std.ArrayList(u8),
+    component_sa_codes: ?std.ArrayList(std.ArrayList(u8)),
     airlock_js: std.ArrayList(u8),
     wgpu_airlock_js: ?std.ArrayList(u8),
     sa3d_airlock_js: ?std.ArrayList(u8),
@@ -34,6 +36,11 @@ const SaxArtifacts = struct {
     fn deinit(self: *SaxArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.root_name);
         self.sa_code.deinit();
+        if (self.shared_sa_code) |*shared| shared.deinit();
+        if (self.component_sa_codes) |*codes| {
+            for (codes.items) |*code| code.deinit();
+            codes.deinit();
+        }
         self.airlock_js.deinit();
         if (self.wgpu_airlock_js) |*js| js.deinit();
         if (self.sa3d_airlock_js) |*js| js.deinit();
@@ -76,6 +83,27 @@ const ReactSourceOptions = struct {
     fn deinit(self: *ReactSourceOptions, allocator: std.mem.Allocator) void {
         allocator.free(self.includes);
         self.* = undefined;
+    }
+};
+
+const ShardedSaxArtifacts = struct {
+    shared_sa_code: std.ArrayList(u8),
+    component_sa_codes: std.ArrayList(std.ArrayList(u8)),
+    airlock_js: std.ArrayList(u8),
+    wgpu_airlock_js: ?std.ArrayList(u8),
+    sa3d_airlock_js: ?std.ArrayList(u8),
+    index_html: std.ArrayList(u8),
+
+    fn deinit(self: *ShardedSaxArtifacts, allocator: std.mem.Allocator) void {
+        self.shared_sa_code.deinit();
+        for (self.component_sa_codes.items) |*code| code.deinit();
+        self.component_sa_codes.deinit();
+        self.airlock_js.deinit();
+        if (self.wgpu_airlock_js) |*js| js.deinit();
+        if (self.sa3d_airlock_js) |*js| js.deinit();
+        self.index_html.deinit();
+        self.* = undefined;
+        _ = allocator;
     }
 };
 
@@ -318,6 +346,11 @@ fn resolveIncludePath(allocator: std.mem.Allocator, sax_file: []const u8, includ
     errdefer allocator.free(relative);
     if (fileExists(relative)) return relative;
     allocator.free(relative);
+
+    const cwd_relative = try allocator.dupe(u8, include_file);
+    errdefer allocator.free(cwd_relative);
+    if (fileExists(cwd_relative)) return cwd_relative;
+    allocator.free(cwd_relative);
 
     if (try findIncludeInPathList(allocator, "SA_REACT_INCLUDE_PATH", include_file)) |path| return path;
     if (try findIncludeNearLoadedPlugins(allocator, include_file)) |path| return path;
@@ -802,7 +835,9 @@ fn compileSaxArtifacts(
 
     const root_name = try lowercaseName(allocator, program.components[0].name);
     errdefer allocator.free(root_name);
-    try sa_code.writer().print("@export sax_app_init() -> ptr:\nL_ENTRY:\n  ctx = call @sax_{s}_init()\n  return ctx\n\n", .{root_name});
+    if (!std.mem.eql(u8, root_name, "app")) {
+        try sa_code.writer().print("@export sax_app_init() -> ptr:\nL_ENTRY:\n  ctx = call @sax_{s}_init()\n  return ctx\n\n", .{root_name});
+    }
 
     var airlock_generator = airlock_gen.AirlockGenerator.init(allocator);
     const airlock_js = try airlock_generator.generateAirlockJSWithOptions(.{ .wgpu = uses_wgpu, .sa3d = uses_sa3d });
@@ -815,11 +850,222 @@ fn compileSaxArtifacts(
         .component_name = sourceStem(sax_file),
         .root_name = root_name,
         .sa_code = sa_code,
+        .shared_sa_code = null,
+        .component_sa_codes = null,
         .airlock_js = airlock_js,
         .wgpu_airlock_js = wgpu_airlock_js,
         .sa3d_airlock_js = sa3d_airlock_js,
         .index_html = index_html,
     };
+}
+
+fn compileSaxArtifactsSharded(
+    allocator: std.mem.Allocator,
+    sax_file: []const u8,
+    source: []const u8,
+    stderr: std.io.AnyWriter,
+) !ShardedSaxArtifacts {
+    var sax_parser = parser.SaxParser.init(allocator, source);
+    var program = sax_parser.parse() catch |err| {
+        try writeParseError(stderr, sax_file, err);
+        return error.SaxCheckFailed;
+    };
+    defer program.deinit();
+
+    if (program.components.len == 0) {
+        try stderr.print("error[SA-REACT-CHECK]: InvalidComponentBody while parsing {s}\n", .{sax_file});
+        return error.SaxCheckFailed;
+    }
+
+    for (program.components) |component| {
+        if (findValidationFailure(allocator, component)) |failure| {
+            try writeValidationFailure(stderr, failure);
+            return error.SaxCheckFailed;
+        }
+    }
+
+    const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
+    defer allocator.free(reachable_components);
+
+    var shared_sa_code = std.ArrayList(u8).init(allocator);
+    errdefer shared_sa_code.deinit();
+
+    var root_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, program.components[0]);
+    defer root_lowerer.deinit();
+    root_lowerer.lower(&shared_sa_code, .{ .shared_decls = .runtime_only, .emit_app_alias = true }) catch |err| {
+        try stderr.print("error[SA-REACT-LOWER]: shared runtime for {s} failed: {s}\n", .{ program.components[0].name, @errorName(err) });
+        return err;
+    };
+
+    var component_sa_codes = std.ArrayList(std.ArrayList(u8)).init(allocator);
+    errdefer {
+        for (component_sa_codes.items) |*code| code.deinit();
+        component_sa_codes.deinit();
+    }
+
+    for (reachable_components) |component| {
+        var component_code = std.ArrayList(u8).init(allocator);
+        errdefer component_code.deinit();
+
+        var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
+        defer sax_lowerer.deinit();
+        sax_lowerer.lower(&component_code, .{ .shared_decls = .component_externs }) catch |err| {
+            try stderr.print("error[SA-REACT-LOWER]: component {s} failed: {s}\n", .{ component.name, @errorName(err) });
+            return err;
+        };
+        try component_sa_codes.append(component_code);
+    }
+
+    var airlock_generator = airlock_gen.AirlockGenerator.init(allocator);
+    const airlock_js = try airlock_generator.generateAirlockJSWithOptions(.{ .wgpu = false, .sa3d = false });
+    errdefer airlock_js.deinit();
+
+    const index_html = try airlock_generator.generateIndexHTML(sourceStem(sax_file), "app.wasm");
+    errdefer index_html.deinit();
+
+    return .{
+        .shared_sa_code = shared_sa_code,
+        .component_sa_codes = component_sa_codes,
+        .airlock_js = airlock_js,
+        .wgpu_airlock_js = null,
+        .sa3d_airlock_js = null,
+        .index_html = index_html,
+    };
+}
+
+fn writeCombinedShardedSa(
+    path: []const u8,
+    shared_sa_code: []const u8,
+    component_sa_codes: []const std.ArrayList(u8),
+) !void {
+    try ensureParentDir(path);
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+
+    try file.writeAll(shared_sa_code);
+    if (shared_sa_code.len != 0 and shared_sa_code[shared_sa_code.len - 1] != '\n') try file.writeAll("\n");
+    for (component_sa_codes, 0..) |component_code, idx| {
+        if (idx != 0) try file.writeAll("\n");
+        try writeComponentSansExternBlock(file.writer(), component_code.items);
+    }
+}
+
+fn writeComponentSansExternBlock(writer: anytype, text: []const u8) !void {
+    var cursor: usize = 0;
+    var in_extern_block = false;
+    while (cursor < text.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, text, cursor, '\n') orelse text.len;
+        const next_cursor = if (line_end < text.len) line_end + 1 else text.len;
+        const line = std.mem.trimRight(u8, text[cursor..line_end], "\r");
+
+        if (!in_extern_block) {
+            if (std.mem.startsWith(u8, line, "@extern ")) {
+                in_extern_block = true;
+            } else {
+                try writer.writeAll(text[cursor..next_cursor]);
+            }
+        } else {
+            if (line.len == 0 or std.mem.startsWith(u8, line, "@extern ")) {
+                cursor = next_cursor;
+                continue;
+            }
+            try writer.writeAll(text[cursor..]);
+            return;
+        }
+
+        cursor = next_cursor;
+    }
+}
+
+fn shardedArtifactsToSourceUnits(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    artifacts: *const ShardedSaxArtifacts,
+) !std.ArrayList(sax_build.SourceUnit) {
+    var units = std.ArrayList(sax_build.SourceUnit).init(allocator);
+    errdefer {
+        for (units.items) |unit| allocator.free(unit.logical_name);
+        units.deinit();
+    }
+
+    try units.append(.{
+        .logical_name = blk: {
+            const name = try allocator.dupe(u8, "shared");
+            errdefer allocator.free(name);
+            break :blk name;
+        },
+        .source_path = source_path,
+        .source_text = artifacts.shared_sa_code.items,
+    });
+
+    for (artifacts.component_sa_codes.items, 0..) |component_code, idx| {
+        const logical_name = try std.fmt.allocPrint(allocator, "component_{d}", .{idx});
+        errdefer allocator.free(logical_name);
+        try units.append(.{
+            .logical_name = logical_name,
+            .source_path = source_path,
+            .source_text = component_code.items,
+        });
+    }
+
+    return units;
+}
+
+fn verifySaxArtifactsSharded(
+    allocator: std.mem.Allocator,
+    sax_file: []const u8,
+    source: []const u8,
+    program: *const parser.SaxProgram,
+    stderr: std.io.AnyWriter,
+) !void {
+    _ = source;
+    const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
+    defer allocator.free(reachable_components);
+
+    var shared_sa_code = std.ArrayList(u8).init(allocator);
+    defer shared_sa_code.deinit();
+    var root_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, program.components[0]);
+    defer root_lowerer.deinit();
+    try root_lowerer.lower(&shared_sa_code, .{ .shared_decls = .runtime_only, .emit_app_alias = true });
+
+    const shared_verified = try sax_build.compileSourceText(allocator, sax_file, shared_sa_code.items, .{ .jobs = 1 });
+    switch (shared_verified) {
+        .trap => |report| {
+            try sax_build.printTrapReport(stderr, report);
+            return error.SaxCheckFailed;
+        },
+        .ok => |ok| {
+            var owned = ok;
+            defer owned.deinit(allocator);
+        },
+    }
+
+    for (reachable_components, 0..) |component, idx| {
+        var sa_code = std.ArrayList(u8).init(allocator);
+        defer sa_code.deinit();
+
+        var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
+        defer sax_lowerer.deinit();
+        sax_lowerer.lower(&sa_code, .{ .shared_decls = .component_externs }) catch |err| {
+            try stderr.print("error[SA-REACT-LOWER]: component {s} failed: {s}\n", .{ component.name, @errorName(err) });
+            return err;
+        };
+
+        const verified = try sax_build.compileSourceText(allocator, sax_file, sa_code.items, .{ .jobs = 1 });
+        switch (verified) {
+            .trap => |report| {
+                try sax_build.printTrapReport(stderr, report);
+                return error.SaxCheckFailed;
+            },
+            .ok => |ok| {
+                var owned = ok;
+                defer owned.deinit(allocator);
+            },
+        }
+
+        if (idx + 1 < reachable_components.len) try stderr.writeByte('.');
+    }
+    if (reachable_components.len != 0) try stderr.writeByte('\n');
 }
 
 fn parseReactSourceOptions(allocator: std.mem.Allocator, argv: []const []const u8, start: usize) !ReactSourceOptions {
@@ -864,23 +1110,55 @@ fn executeSaxCheck(
 ) !u8 {
     const source = try readComposedSource(ctx.allocator, sax_file, includes, stderr);
     defer ctx.allocator.free(source);
-    var artifacts = compileSaxArtifacts(ctx.allocator, sax_file, source, stderr) catch |err| switch (err) {
+    const uses_wgpu = sourceUsesWgpu(source);
+    const uses_sa3d = sourceUsesSa3d(source);
+
+    if (uses_wgpu or uses_sa3d) {
+        var artifacts = compileSaxArtifacts(ctx.allocator, sax_file, source, stderr) catch |err| switch (err) {
+            error.SaxCheckFailed => return 1,
+            else => return err,
+        };
+        defer artifacts.deinit(ctx.allocator);
+
+        const verified = try sax_build.compileSourceText(ctx.allocator, sax_file, artifacts.sa_code.items, .{});
+        switch (verified) {
+            .trap => |report| {
+                try sax_build.printTrapReport(stderr, report);
+                return 1;
+            },
+            .ok => |ok| {
+                var owned = ok;
+                defer owned.deinit(ctx.allocator);
+            },
+        }
+
+        try stdout.print("React check passed: {s}\n", .{sax_file});
+        return 0;
+    }
+
+    var sax_parser = parser.SaxParser.init(ctx.allocator, source);
+    var program = sax_parser.parse() catch |err| {
+        try writeParseError(stderr, sax_file, err);
+        return 1;
+    };
+    defer program.deinit();
+
+    if (program.components.len == 0) {
+        try stderr.print("error[SA-REACT-CHECK]: InvalidComponentBody while parsing {s}\n", .{sax_file});
+        return 1;
+    }
+
+    for (program.components) |component| {
+        if (findValidationFailure(ctx.allocator, component)) |failure| {
+            try writeValidationFailure(stderr, failure);
+            return 1;
+        }
+    }
+
+    verifySaxArtifactsSharded(ctx.allocator, sax_file, source, &program, stderr) catch |err| switch (err) {
         error.SaxCheckFailed => return 1,
         else => return err,
     };
-    defer artifacts.deinit(ctx.allocator);
-
-    const verified = try sax_build.compileSourceText(ctx.allocator, sax_file, artifacts.sa_code.items, .{});
-    switch (verified) {
-        .trap => |report| {
-            try sax_build.printTrapReport(stderr, report);
-            return 1;
-        },
-        .ok => |ok| {
-            var owned = ok;
-            defer owned.deinit(ctx.allocator);
-        },
-    }
 
     try stdout.print("React check passed: {s}\n", .{sax_file});
     return 0;
@@ -896,11 +1174,8 @@ fn executeSaxBuild(
 ) !u8 {
     const source = try readComposedSource(ctx.allocator, sax_file, includes, stderr);
     defer ctx.allocator.free(source);
-    var artifacts = compileSaxArtifacts(ctx.allocator, sax_file, source, stderr) catch |err| switch (err) {
-        error.SaxCheckFailed => return 1,
-        else => return err,
-    };
-    defer artifacts.deinit(ctx.allocator);
+    const uses_wgpu = sourceUsesWgpu(source);
+    const uses_sa3d = sourceUsesSa3d(source);
 
     const sa_path = try std.fs.path.join(ctx.allocator, &.{ out_dir, "app.sa" });
     defer ctx.allocator.free(sa_path);
@@ -915,12 +1190,63 @@ fn executeSaxBuild(
     const wasm_path = try std.fs.path.join(ctx.allocator, &.{ out_dir, "app.wasm" });
     defer ctx.allocator.free(wasm_path);
 
-    try writeAllFile(sa_path, artifacts.sa_code.items);
+    if (uses_wgpu or uses_sa3d) {
+        var artifacts = compileSaxArtifacts(ctx.allocator, sax_file, source, stderr) catch |err| switch (err) {
+            error.SaxCheckFailed => return 1,
+            else => return err,
+        };
+        defer artifacts.deinit(ctx.allocator);
 
-    const build_code = try sax_build.buildBrowserWasmFromSourceText(
+        try writeAllFile(sa_path, artifacts.sa_code.items);
+
+        const build_code = try sax_build.buildBrowserWasmFromSourceText(
+            ctx.allocator,
+            sa_path,
+            artifacts.sa_code.items,
+            wasm_path,
+            false,
+            .release_small,
+            .{ .jobs = 1, .dce = .full },
+            stderr,
+        );
+        if (build_code != 0) return build_code;
+
+        try writeAllFile(airlock_path, artifacts.airlock_js.items);
+        if (artifacts.wgpu_airlock_js) |*wgpu_js| {
+            try writeAllFile(wgpu_airlock_path, wgpu_js.items);
+        }
+        if (artifacts.sa3d_airlock_js) |*sa3d_js| {
+            try writeAllFile(sa3d_airlock_path, sa3d_js.items);
+        }
+        try writeAllFile(html_path, artifacts.index_html.items);
+
+        try stdout.print("React build successful\n", .{});
+        try stdout.print("  app.sa: {s}\n", .{sa_path});
+        try stdout.print("  app.wasm: {s}\n", .{wasm_path});
+        try stdout.print("  airlock.js: {s}\n", .{airlock_path});
+        if (artifacts.wgpu_airlock_js != null) try stdout.print("  wgpu_airlock.js: {s}\n", .{wgpu_airlock_path});
+        if (artifacts.sa3d_airlock_js != null) try stdout.print("  sa3d_airlock.js: {s}\n", .{sa3d_airlock_path});
+        try stdout.print("  index.html: {s}\n", .{html_path});
+        return 0;
+    }
+
+    var artifacts = compileSaxArtifactsSharded(ctx.allocator, sax_file, source, stderr) catch |err| switch (err) {
+        error.SaxCheckFailed => return 1,
+        else => return err,
+    };
+    defer artifacts.deinit(ctx.allocator);
+
+    try writeCombinedShardedSa(sa_path, artifacts.shared_sa_code.items, artifacts.component_sa_codes.items);
+
+    var source_units = try shardedArtifactsToSourceUnits(ctx.allocator, sax_file, &artifacts);
+    defer {
+        for (source_units.items) |unit| ctx.allocator.free(unit.logical_name);
+        source_units.deinit();
+    }
+
+    const build_code = try sax_build.buildBrowserWasmFromSourceUnits(
         ctx.allocator,
-        sa_path,
-        artifacts.sa_code.items,
+        source_units.items,
         wasm_path,
         false,
         .release_small,
@@ -930,20 +1256,12 @@ fn executeSaxBuild(
     if (build_code != 0) return build_code;
 
     try writeAllFile(airlock_path, artifacts.airlock_js.items);
-    if (artifacts.wgpu_airlock_js) |*wgpu_js| {
-        try writeAllFile(wgpu_airlock_path, wgpu_js.items);
-    }
-    if (artifacts.sa3d_airlock_js) |*sa3d_js| {
-        try writeAllFile(sa3d_airlock_path, sa3d_js.items);
-    }
     try writeAllFile(html_path, artifacts.index_html.items);
 
     try stdout.print("React build successful\n", .{});
     try stdout.print("  app.sa: {s}\n", .{sa_path});
     try stdout.print("  app.wasm: {s}\n", .{wasm_path});
     try stdout.print("  airlock.js: {s}\n", .{airlock_path});
-    if (artifacts.wgpu_airlock_js != null) try stdout.print("  wgpu_airlock.js: {s}\n", .{wgpu_airlock_path});
-    if (artifacts.sa3d_airlock_js != null) try stdout.print("  sa3d_airlock.js: {s}\n", .{sa3d_airlock_path});
     try stdout.print("  index.html: {s}\n", .{html_path});
     return 0;
 }
@@ -1204,6 +1522,15 @@ fn expectSaxCliFailure(argv: []const []const u8, expected_code: u8, expected_err
     try std.testing.expect(std.mem.containsAtLeast(u8, stderr_buf.items, 1, expected_error));
 }
 
+fn expectNoNonWhitespaceStderr(stderr: []const u8) !void {
+    for (stderr) |byte| {
+        switch (byte) {
+            ' ', '\t', '\r', '\n', '.' => {},
+            else => return error.TestExpectedEqual,
+        }
+    }
+}
+
 test "react plugin exports runtime descriptor" {
     try std.testing.expectEqualStrings("react", std.mem.span(descriptor.name));
     try std.testing.expectEqual(@as(usize, 1), descriptor.skills_len);
@@ -1238,7 +1565,7 @@ test "react plugin check parses and lowers a real component" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "counter.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
     try std.testing.expectError(error.FileNotFound, std.fs.cwd().openFile("dist/app.sa", .{}));
 }
 
@@ -1260,7 +1587,7 @@ test "react plugin build emits frontend artifacts from real sax source" {
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React build successful"));
     try std.testing.expect(!std.mem.containsAtLeast(u8, stdout_buf.items, 1, "sax build:"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 
     const sa = try std.fs.cwd().readFileAlloc(std.testing.allocator, "public/app.sa", 2 * 1024 * 1024);
     defer std.testing.allocator.free(sa);
@@ -1317,13 +1644,13 @@ test "react plugin composes included sax component sources" {
     const check_code = try invokeForTest(&.{ "sa", "react", "check", "app.sax", "--include", "lib/components.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), check_code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 
     stdout_buf.clearRetainingCapacity();
     stderr_buf.clearRetainingCapacity();
     const build_code = try invokeForTest(&.{ "sa", "react", "build", "app.sax", "--include", "lib/components.sax", "--out-dir", "public" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), build_code);
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 
     const sa = try std.fs.cwd().readFileAlloc(std.testing.allocator, "public/app.sa", 2 * 1024 * 1024);
     defer std.testing.allocator.free(sa);
@@ -1370,7 +1697,26 @@ test "react plugin resolves includes from loaded plugin share dirs" {
     const check_code = try invokeForTest(&.{ "sa", "react", "check", "app.sax", "--include", "mui/material.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), check_code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
+}
+
+test "react plugin resolves includes relative to cwd before plugin installs" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("demos");
+    try tmp.dir.makePath("mui");
+    try tmp.dir.writeFile(.{ .sub_path = "demos/app.sax", .data = "<Component name=\"App\"><div /></Component>" });
+    try tmp.dir.writeFile(.{ .sub_path = "mui/material.sax", .data = "<Component name=\"LocalMui\"><div /></Component>" });
+
+    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    defer old_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer old_cwd.setAsCwd() catch {};
+
+    const path = try resolveIncludePath(std.testing.allocator, "demos/app.sax", "mui/material.sax");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("mui/material.sax", path);
 }
 
 test "react plugin check reports state leaks" {
@@ -1449,7 +1795,7 @@ test "react plugin check accepts negated logical object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "negated_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts logical or object spreads" {
@@ -1487,7 +1833,7 @@ test "react plugin check accepts logical or object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts negated logical or object spreads" {
@@ -1525,7 +1871,7 @@ test "react plugin check accepts negated logical or object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "negated_logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts nested dynamic object spreads" {
@@ -1564,7 +1910,7 @@ test "react plugin check accepts nested dynamic object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "nested_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts nested ptr ternary object spreads" {
@@ -1606,7 +1952,7 @@ test "react plugin check accepts nested ptr ternary object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "nested_ptr_ternary_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts nested logical or ptr object spreads" {
@@ -1646,7 +1992,7 @@ test "react plugin check accepts nested logical or ptr object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "nested_logical_or_ptr_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts array item dynamic object spreads" {
@@ -1685,7 +2031,7 @@ test "react plugin check accepts array item dynamic object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts leading array item dynamic object spreads" {
@@ -1724,7 +2070,7 @@ test "react plugin check accepts leading array item dynamic object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts leading array item conditional object spreads" {
@@ -1762,7 +2108,7 @@ test "react plugin check accepts leading array item conditional object spreads" 
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_conditional_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts leading array item ternary null branch object spreads" {
@@ -1800,7 +2146,7 @@ test "react plugin check accepts leading array item ternary null branch object s
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_ternary_null_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts leading array item logical or object spreads" {
@@ -1838,7 +2184,7 @@ test "react plugin check accepts leading array item logical or object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts array item conditional object spreads" {
@@ -1876,7 +2222,7 @@ test "react plugin check accepts array item conditional object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_conditional_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts array item ternary null branch object spreads" {
@@ -1914,7 +2260,7 @@ test "react plugin check accepts array item ternary null branch object spreads" 
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_ternary_null_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check accepts array item logical or object spreads" {
@@ -1952,7 +2298,7 @@ test "react plugin check accepts array item logical or object spreads" {
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 }
 
 test "react plugin check rejects render calls outside handlers" {
@@ -2038,7 +2384,7 @@ test "react plugin new creates a usable project scaffold" {
     const code = try invokeForTest(&.{ "sa", "react", "new", "demo" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React project created"));
-    try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
+    try expectNoNonWhitespaceStderr(stderr_buf.items);
 
     const app = try std.fs.cwd().readFileAlloc(std.testing.allocator, "demo/app.sax", 1024 * 1024);
     defer std.testing.allocator.free(app);

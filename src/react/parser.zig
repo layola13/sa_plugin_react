@@ -379,6 +379,7 @@ fn splitLines(text: []const u8) std.mem.SplitIterator(u8, .scalar) {
 }
 
 fn isSupportedEvent(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "onclickaway")) return true;
     for (event_whitelist) |item| {
         if (std.mem.eql(u8, item, name)) return true;
     }
@@ -6084,6 +6085,32 @@ test "parser accepts React-style event handler references" {
     try std.testing.expect(button.attrs[0].is_event);
     try std.testing.expectEqualStrings("onclick", button.attrs[0].name);
     try std.testing.expectEqualStrings("inc", button.attrs[0].event_handler.?);
+}
+
+test "parser accepts synthetic onClickAway event handler references" {
+    const source =
+        \\<Component name="App">
+        \\  <Action onClickAway={close_menu}>Projected</Action>
+        \\  @close_menu:
+        \\  L_ENTRY:
+        \\    ret
+        \\</Component>
+        \\<Component name="Action">
+        \\  <div><Slot /></div>
+        \\</Component>
+    ;
+
+    var sax_parser = SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    const app = program.components[0];
+    const action = app.dom_nodes[0];
+    try std.testing.expect(action.is_user_component);
+    try std.testing.expectEqual(@as(usize, 1), action.attrs.len);
+    try std.testing.expect(action.attrs[0].is_event);
+    try std.testing.expectEqualStrings("onclickaway", action.attrs[0].name);
+    try std.testing.expectEqualStrings("close_menu", action.attrs[0].event_handler.?);
 }
 
 test "parser accepts React capture event handler references" {

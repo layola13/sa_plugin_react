@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub const DceMode = enum {
     no,
     std,
@@ -26,8 +24,19 @@ pub const EmitOptions = struct {
     wasm_compat: bool = false,
     jobs: ?usize = null,
     test_mode: bool = false,
+    opt_level: u8 = 0,
     codegen_unit_index: ?usize = null,
     codegen_unit_count: usize = 1,
+    function_task_index: ?usize = null,
     dce: DceMode = .std,
     std_root: ?[]const u8 = null,
 };
+
+const std = @import("std");
+
+test "dce mode parsing" {
+    try std.testing.expectEqual(DceMode.no, DceMode.parse("no").?);
+    try std.testing.expectEqual(DceMode.std, DceMode.parse("std").?);
+    try std.testing.expectEqual(DceMode.full, DceMode.parse("full").?);
+    try std.testing.expect(DceMode.parse("bad") == null);
+}

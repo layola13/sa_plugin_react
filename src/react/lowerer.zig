@@ -12,8 +12,16 @@ pub const LowerError = error{
     InvalidTextExpression,
 };
 
+pub const SharedDeclMode = enum {
+    none,
+    full,
+    component_externs,
+    runtime_only,
+};
+
 pub const LowerOptions = struct {
     emit_shared_decls: bool = true,
+    shared_decls: ?SharedDeclMode = null,
     emit_app_alias: bool = false,
 };
 
@@ -133,6 +141,7 @@ const I64EqLiteralConditionItem = struct {
 };
 
 const StaticEqConditionItem = union(enum) {
+    truthy_state: []const u8,
     ptr_eq_literal: PtrEqLiteralConditionItem,
     i64_eq_literal: I64EqLiteralConditionItem,
 };
@@ -461,6 +470,7 @@ fn eventBaseAttrName(attr_name: []const u8) []const u8 {
 
 fn domEventName(node: parser.DomNode, attr_name: []const u8) []const u8 {
     const base_attr = eventBaseAttrName(attr_name);
+    if (std.mem.eql(u8, base_attr, "onclickaway")) return "clickaway";
     if (std.mem.eql(u8, base_attr, "ondoubleclick")) return "dblclick";
     if (std.mem.eql(u8, base_attr, "onchange")) {
         if (std.mem.eql(u8, node.tag, "textarea")) return "input";
@@ -544,6 +554,9 @@ fn reactComponentPropAlias(attr_name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, attr_name, "itemid")) return "itemID";
     if (std.mem.eql(u8, attr_name, "itemref")) return "itemRef";
     if (std.mem.eql(u8, attr_name, "font-size")) return "fontSize";
+    if (std.mem.eql(u8, attr_name, "aria-label")) return "ariaLabel";
+    if (std.mem.eql(u8, attr_name, "aria-labelledby")) return "ariaLabelledby";
+    if (std.mem.eql(u8, attr_name, "aria-describedby")) return "ariaDescribedby";
     return null;
 }
 
@@ -749,6 +762,107 @@ pub const SaxLowerer = struct {
             }
         }
         return null;
+    }
+
+    fn slotContextScope(component: parser.Component) ?[]const u8 {
+        for (component.dom_nodes) |node| {
+            if (!std.mem.eql(u8, node.tag, "Slot")) continue;
+            for (node.attrs) |attr| {
+                if (!std.mem.eql(u8, attr.name, "contextScope")) continue;
+                return switch (attr.value) {
+                    .literal => |lit| lit,
+                    else => null,
+                };
+            }
+        }
+        return null;
+    }
+
+    fn firstSlotNodeIndex(component: parser.Component) ?usize {
+        for (component.dom_nodes, 0..) |node, idx| {
+            if (std.mem.eql(u8, node.tag, "Slot")) return idx;
+        }
+        return null;
+    }
+
+    fn nodeDepthToTarget(component: parser.Component, root_idx: usize, target_idx: usize) ?usize {
+        if (root_idx == target_idx) return 0;
+        const node = component.dom_nodes[root_idx];
+        for (node.children) |child| {
+            switch (child) {
+                .node_index => |child_idx| {
+                    if (nodeDepthToTarget(component, child_idx, target_idx)) |depth| return depth + 1;
+                },
+                .text => {},
+            }
+        }
+        return null;
+    }
+
+    fn componentForwardedSlotProviderComponentDepth(self: *const SaxLowerer, component: parser.Component, depth: usize) ?parser.Component {
+        if (depth > 8) return null;
+        const slot_idx = firstSlotNodeIndex(component) orelse return null;
+        var best_component: ?parser.Component = null;
+        var best_depth: usize = std.math.maxInt(usize);
+        for (component.dom_nodes, 0..) |node, idx| {
+            if (!node.is_user_component) continue;
+            const distance = nodeDepthToTarget(component, idx, slot_idx) orelse continue;
+            if (distance == 0 or distance >= best_depth) continue;
+            const child_component = self.componentByName(node.tag) orelse continue;
+            if (self.componentEffectiveSlotContextPropsDepth(child_component, depth + 1) == null) continue;
+            best_component = child_component;
+            best_depth = distance;
+        }
+        return best_component;
+    }
+
+    fn componentEffectiveSlotContextProps(self: *const SaxLowerer, component: parser.Component) ?[]const u8 {
+        return self.componentEffectiveSlotContextPropsDepth(component, 0);
+    }
+
+    fn componentEffectiveSlotContextPropsDepth(self: *const SaxLowerer, component: parser.Component, depth: usize) ?[]const u8 {
+        if (slotContextProps(component)) |props| return props;
+        if (depth > 8) return null;
+        const provider_component = self.componentForwardedSlotProviderComponentDepth(component, depth) orelse return null;
+        return self.componentEffectiveSlotContextPropsDepth(provider_component, depth + 1);
+    }
+
+    fn componentEffectiveSlotContextScope(self: *const SaxLowerer, component: parser.Component) ?[]const u8 {
+        return self.componentEffectiveSlotContextScopeDepth(component, 0);
+    }
+
+    fn componentEffectiveSlotContextScopeDepth(self: *const SaxLowerer, component: parser.Component, depth: usize) ?[]const u8 {
+        if (slotContextScope(component)) |scope| return scope;
+        if (depth > 8) return null;
+        const provider_component = self.componentForwardedSlotProviderComponentDepth(component, depth) orelse return null;
+        return self.componentEffectiveSlotContextScopeDepth(provider_component, depth + 1);
+    }
+
+    fn componentHasAnyStatePropInList(self: *const SaxLowerer, component_name: []const u8, props: []const u8) bool {
+        var start: usize = 0;
+        while (start < props.len) {
+            while (start < props.len and isContextPropListDelimiter(props[start])) start += 1;
+            if (start >= props.len) break;
+            var end = start;
+            while (end < props.len and !isContextPropListDelimiter(props[end])) end += 1;
+            if (self.componentStateProp(component_name, props[start..end]) != null) return true;
+            start = end;
+        }
+        return false;
+    }
+
+    fn nodeProvidesContextProps(self: *const SaxLowerer, node: parser.DomNode) bool {
+        if (!node.is_user_component) return false;
+        const component = self.componentByName(node.tag) orelse return false;
+        const props = self.componentEffectiveSlotContextProps(component) orelse return false;
+        return self.componentHasAnyStatePropInList(node.tag, props);
+    }
+
+    fn nodeProvidesDescendantContextProps(self: *const SaxLowerer, node: parser.DomNode) bool {
+        if (!self.nodeProvidesContextProps(node)) return false;
+        const component = self.componentByName(node.tag) orelse return false;
+        const scope = self.componentEffectiveSlotContextScope(component) orelse return false;
+        return std.mem.eql(u8, scope, "descendants");
     }
 
     fn childHasExplicitComponentProp(self: *const SaxLowerer, child_node: parser.DomNode, state_name: []const u8) bool {
@@ -1285,6 +1399,11 @@ pub const SaxLowerer = struct {
             "@extern sax_json_normalize_object(*src_ptr: ptr, src_len: i64, *dst_ptr: ptr, dst_len: i64) -> i64",
             "@extern sax_mem_copy(*dst_ptr: ptr, *src_ptr: ptr, len: i64) -> void",
             "@extern sax_mem_eq(*lhs_ptr: ptr, *rhs_ptr: ptr, len: i64) -> i1",
+            "@extern sax_array_push(^vec: ptr, &elem_ptr: ptr, elem_size: u64) -> ^ptr",
+            "@extern sax_array_get(&vec: ptr, index: u64) -> u64",
+            "@extern sax_array_remove(&vec: ptr, index: u64) -> void",
+            "@extern sax_array_len(&vec: ptr) -> u64",
+            "@extern sax_array_free(^vec: ptr) -> void",
         };
         for (decls) |decl| try out.writer().print("{s}\n", .{decl});
         try out.writer().writeByte('\n');
@@ -2765,6 +2884,10 @@ pub const SaxLowerer = struct {
         var count: usize = 0;
 
         switch (left_cond) {
+            .state_truthy => |state_name| {
+                items[count] = .{ .truthy_state = state_name };
+                count += 1;
+            },
             .ptr_eq_literal => |left_eq| {
                 items[count] = .{ .ptr_eq_literal = .{ .state_name = left_eq.state_name, .literal = left_eq.literal } };
                 count += 1;
@@ -2778,6 +2901,11 @@ pub const SaxLowerer = struct {
         }
 
         switch (right_cond) {
+            .state_truthy => |state_name| {
+                if (count + 1 > 8) return null;
+                items[count] = .{ .truthy_state = state_name };
+                count += 1;
+            },
             .ptr_eq_literal => |right_eq| {
                 if (count + 1 > 8) return null;
                 items[count] = .{ .ptr_eq_literal = .{ .state_name = right_eq.state_name, .literal = right_eq.literal } };
@@ -3006,6 +3134,14 @@ pub const SaxLowerer = struct {
                     if (chain_idx + 1 != chain_cond.count) try temp_bool_names.append(item_bool_name);
 
                     const current_bool_name = switch (item) {
+                        .truthy_state => |state_name| blk: {
+                            const truthy_bool_name = try std.fmt.allocPrint(self.allocator, "{s}_ternary_static_eq_truthy_bool_{d}_{d}", .{ prefix, idx, chain_idx });
+                            try temp_bool_names.append(truthy_bool_name);
+                            const side_name = try std.fmt.allocPrint(self.allocator, "static_eq_truthy_{d}", .{chain_idx});
+                            defer self.allocator.free(side_name);
+                            try self.emitTruthyStateLoad(out, state_name, truthy_bool_name, prefix, idx, side_name);
+                            break :blk truthy_bool_name;
+                        },
                         .ptr_eq_literal => |eq_item| blk: {
                             const slice_prefix = try std.fmt.allocPrint(self.allocator, "{s}_ternary_static_eq_ptr_{d}_{d}", .{ prefix, idx, chain_idx });
                             defer self.allocator.free(slice_prefix);
@@ -4377,7 +4513,7 @@ pub const SaxLowerer = struct {
                 continue;
             }
             if (isRefAttr(attr.name) or isKeyAttr(attr.name) or isReactDomNoopAttr(attr.name)) continue;
-            if (std.mem.eql(u8, node.tag, "Slot") and std.mem.eql(u8, attr.name, "contextProps")) continue;
+            if (std.mem.eql(u8, node.tag, "Slot") and (std.mem.eql(u8, attr.name, "contextProps") or std.mem.eql(u8, attr.name, "contextScope"))) continue;
             if (isDangerouslySetInnerHtmlAttr(attr.name)) {
                 switch (attr.value) {
                     .literal => |lit| {
@@ -4679,11 +4815,167 @@ pub const SaxLowerer = struct {
         try out.writer().print("  call @{s}({s}, *{s}, {s})\n", .{ setter, ctx_var, buf_name, len_name });
     }
 
+    fn pascalizeObjectKey(self: *SaxLowerer, key: []const u8) ![]u8 {
+        var out = std.ArrayList(u8).init(self.allocator);
+        errdefer out.deinit();
+
+        var uppercase_next = true;
+        for (key) |c| {
+            if (!std.ascii.isAlphanumeric(c)) {
+                uppercase_next = true;
+                continue;
+            }
+            if (uppercase_next) {
+                try out.append(std.ascii.toUpper(c));
+                uppercase_next = false;
+            } else {
+                try out.append(c);
+            }
+        }
+
+        return out.toOwnedSlice();
+    }
+
+    fn projectedObjectStateName(self: *SaxLowerer, prefix: []const u8, key: []const u8, suffix: []const u8) ![]u8 {
+        const pascal_key = try self.pascalizeObjectKey(key);
+        defer self.allocator.free(pascal_key);
+        return try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ prefix, pascal_key, suffix });
+    }
+
+    fn emitUserComponentStringStateLiteral(
+        self: *SaxLowerer,
+        out: *std.ArrayList(u8),
+        node: parser.DomNode,
+        ctx_var: []const u8,
+        state_name: []const u8,
+        value: []const u8,
+    ) !bool {
+        const target_state = self.componentStateVar(node.tag, state_name) orelse return false;
+        if (target_state.ty != .ptr) return false;
+
+        const setter = try self.componentStringStateSetterName(node.tag, state_name);
+        defer self.allocator.free(setter);
+        const value_idx = try self.string_pool.add(value);
+        const value_const = try std.fmt.allocPrint(self.allocator, "sax_{s}_{d}", .{ self.component.name, value_idx });
+        defer self.allocator.free(value_const);
+        try out.writer().print("  call @{s}({s}, *{s}, {})\n", .{ setter, ctx_var, value_const, value.len });
+        return true;
+    }
+
+    fn emitMuiClassesObjectProp(
+        self: *SaxLowerer,
+        out: *std.ArrayList(u8),
+        node: parser.DomNode,
+        ctx_var: []const u8,
+        literal: []const u8,
+    ) !bool {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, literal, .{}) catch return false;
+        defer parsed.deinit();
+
+        const object = switch (parsed.value) {
+            .object => |obj| obj,
+            else => return false,
+        };
+
+        var emitted = false;
+        var it = object.iterator();
+        while (it.next()) |entry| {
+            const class_name = switch (entry.value_ptr.*) {
+                .string => |value| value,
+                else => continue,
+            };
+
+            const state_name = try self.projectedObjectStateName("classes", entry.key_ptr.*, "");
+            defer self.allocator.free(state_name);
+            if (try self.emitUserComponentStringStateLiteral(out, node, ctx_var, state_name, class_name)) {
+                emitted = true;
+                continue;
+            }
+
+            if (std.mem.eql(u8, entry.key_ptr.*, "root")) {
+                if (try self.emitUserComponentStringStateLiteral(out, node, ctx_var, "className", class_name)) {
+                    emitted = true;
+                }
+            }
+        }
+
+        return emitted;
+    }
+
+    fn emitMuiSlotPropsObjectProp(
+        self: *SaxLowerer,
+        out: *std.ArrayList(u8),
+        node: parser.DomNode,
+        ctx_var: []const u8,
+        literal: []const u8,
+    ) !bool {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, literal, .{}) catch return false;
+        defer parsed.deinit();
+
+        const object = switch (parsed.value) {
+            .object => |obj| obj,
+            else => return false,
+        };
+
+        var emitted = false;
+        var it = object.iterator();
+        while (it.next()) |entry| {
+            const slot_object = switch (entry.value_ptr.*) {
+                .object => |obj| obj,
+                else => continue,
+            };
+            const class_value = switch (slot_object.get("className") orelse continue) {
+                .string => |value| value,
+                else => continue,
+            };
+
+            const state_name = try self.projectedObjectStateName("slotProps", entry.key_ptr.*, "ClassName");
+            defer self.allocator.free(state_name);
+            if (try self.emitUserComponentStringStateLiteral(out, node, ctx_var, state_name, class_value)) {
+                emitted = true;
+                continue;
+            }
+
+            if (std.mem.eql(u8, entry.key_ptr.*, "root")) {
+                if (try self.emitUserComponentStringStateLiteral(out, node, ctx_var, "className", class_value)) {
+                    emitted = true;
+                }
+            }
+        }
+
+        return emitted;
+    }
+
+    fn emitMuiObjectPropProjection(
+        self: *SaxLowerer,
+        out: *std.ArrayList(u8),
+        node: parser.DomNode,
+        ctx_var: []const u8,
+        attr: parser.Attribute,
+    ) !bool {
+        if (!attr.is_object_prop) return false;
+        const literal = switch (attr.value) {
+            .literal => |lit| lit,
+            else => return false,
+        };
+        if (std.mem.eql(u8, attr.name, "classes")) {
+            return try self.emitMuiClassesObjectProp(out, node, ctx_var, literal);
+        }
+        if (std.mem.eql(u8, attr.name, "slotProps") or std.mem.eql(u8, attr.name, "componentsProps")) {
+            return try self.emitMuiSlotPropsObjectProp(out, node, ctx_var, literal);
+        }
+        return false;
+    }
+
     fn emitUserComponentProps(self: *SaxLowerer, out: *std.ArrayList(u8), node: parser.DomNode, ctx_var: []const u8) !void {
         for (node.attrs, 0..) |attr, idx| {
             if (attr.is_event) continue;
             if (isRefAttr(attr.name) or isKeyAttr(attr.name)) continue;
-            const target_prop = self.componentStateProp(node.tag, attr.name) orelse continue;
+            const projected_object_prop = try self.emitMuiObjectPropProjection(out, node, ctx_var, attr);
+            const target_prop = self.componentStateProp(node.tag, attr.name) orelse {
+                if (projected_object_prop) continue;
+                continue;
+            };
             const target_state = target_prop.state;
             switch (attr.value) {
                 .literal => |lit| {
@@ -4734,15 +5026,48 @@ pub const SaxLowerer = struct {
                         }
                         continue;
                     }
+                    if (target_state.ty == .i1) {
+                        if (simpleI1LiteralValue(expr.expr)) |bool_value| {
+                            const setter = try self.componentStateSetterName(node.tag, target_prop.name);
+                            defer self.allocator.free(setter);
+                            try out.writer().print("  call @{s}({s}, {})\n", .{ setter, ctx_var, @as(i64, if (bool_value) 1 else 0) });
+                            continue;
+                        }
+                    }
                     var expr_arena = std.heap.ArenaAllocator.init(self.allocator);
                     defer expr_arena.deinit();
                     const prefix = try std.fmt.allocPrint(self.allocator, "prop_expr_{s}_{d}", .{ node.alias, idx });
                     defer self.allocator.free(prefix);
                     const value = try self.emitInterpolationExpr(out, expr, prefix, expr_arena.allocator());
-                    if (value.ty != .i64) return LowerError.InvalidInterpolation;
                     const setter = try self.componentStateSetterName(node.tag, target_prop.name);
                     defer self.allocator.free(setter);
-                    try out.writer().print("  call @{s}({s}, {s})\n", .{ setter, ctx_var, value.name });
+                    switch (target_state.ty) {
+                        .i64 => {
+                            if (value.ty != .i64) return LowerError.InvalidInterpolation;
+                            try out.writer().print("  call @{s}({s}, {s})\n", .{ setter, ctx_var, value.name });
+                        },
+                        .i32 => {
+                            if (value.ty != .i64) return LowerError.InvalidInterpolation;
+                            try out.writer().print("  call @{s}({s}, {s})\n", .{ setter, ctx_var, value.name });
+                        },
+                        .i1 => {
+                            switch (value.ty) {
+                                .i64 => try out.writer().print("  call @{s}({s}, {s})\n", .{ setter, ctx_var, value.name }),
+                                .i1 => {
+                                    const wide_name = try std.fmt.allocPrint(self.allocator, "prop_i1_wide_{s}_{d}", .{ node.alias, idx });
+                                    defer self.allocator.free(wide_name);
+                                    try out.writer().print("  {s} = zext {s} as i64\n", .{ wide_name, value.name });
+                                    try out.writer().print("  call @{s}({s}, {s})\n", .{ setter, ctx_var, wide_name });
+                                },
+                                else => return LowerError.InvalidInterpolation,
+                            }
+                        },
+                        .f64 => {
+                            if (value.ty != .f64 and value.ty != .i64) return LowerError.InvalidInterpolation;
+                            try out.writer().print("  call @{s}({s}, {s})\n", .{ setter, ctx_var, value.name });
+                        },
+                        .ptr => unreachable,
+                    }
                 },
                 .template => |pieces| {
                     if (target_state.ty != .ptr) continue;
@@ -4850,7 +5175,7 @@ pub const SaxLowerer = struct {
         prefix_base: []const u8,
     ) !void {
         const provider_component = self.componentByName(provider_node.tag) orelse return;
-        const props = slotContextProps(provider_component) orelse return;
+        const props = self.componentEffectiveSlotContextProps(provider_component) orelse return;
         var start: usize = 0;
         var ordinal: usize = 0;
         while (start < props.len) {
@@ -4933,6 +5258,7 @@ pub const SaxLowerer = struct {
         owner_ctx_var: []const u8,
         context_provider_node: ?parser.DomNode,
         context_provider_ctx_var: ?[]const u8,
+        context_provider_descendants: bool,
     ) !void {
         const node = self.component.dom_nodes[idx];
         const stem = try self.componentExportStem(node.tag);
@@ -4949,17 +5275,25 @@ pub const SaxLowerer = struct {
         }
         try self.emitUserComponentProps(out, node, ctx_var);
         try self.emitUserComponentEventBindings(out, node, ctx_var, owner_ctx_var);
-        if (node.children.len == 0) return;
+        if (node.children.len == 0) {
+            try out.writer().print("  !{s}\n", .{ctx_var});
+            return;
+        }
         const slot_var = try std.fmt.allocPrint(self.allocator, "slot_{d}", .{idx});
         defer self.allocator.free(slot_var);
         try out.writer().print("  {s} = call @sax_{s}_slot({s})\n", .{ slot_var, stem, ctx_var });
         var text_idx: usize = 0;
+        const current_provides_context = self.nodeProvidesContextProps(node);
+        const current_provides_descendant_context = self.nodeProvidesDescendantContextProps(node);
         for (node.children, 0..) |child, child_order| {
             switch (child) {
                 .node_index => |child_idx| {
                     const child_node = self.component.dom_nodes[child_idx];
                     if (child_node.is_user_component) {
-                        try self.emitUserComponentMount(out, child_idx, slot_var, owner_ctx_var, node, ctx_var);
+                        const next_context_node: ?parser.DomNode = if (current_provides_context) node else if (context_provider_descendants) context_provider_node else null;
+                        const next_context_ctx: ?[]const u8 = if (current_provides_context) ctx_var else if (context_provider_descendants) context_provider_ctx_var else null;
+                        const next_context_descendants = if (current_provides_context) current_provides_descendant_context else context_provider_descendants;
+                        try self.emitUserComponentMount(out, child_idx, slot_var, owner_ctx_var, next_context_node, next_context_ctx, next_context_descendants);
                     } else {
                         const child_var = try std.fmt.allocPrint(self.allocator, "node_{d}", .{child_idx});
                         defer self.allocator.free(child_var);
@@ -4976,6 +5310,7 @@ pub const SaxLowerer = struct {
                 },
             }
         }
+        try out.writer().print("  !{s}\n", .{ctx_var});
     }
 
     fn emitProjectedTextChild(
@@ -5043,7 +5378,7 @@ pub const SaxLowerer = struct {
 
     fn emitUserComponentContextPropUpdatesForChildren(self: *SaxLowerer, out: *std.ArrayList(u8), node: parser.DomNode, node_idx: usize, provider_ctx_var: []const u8) !void {
         const provider_component = self.componentByName(node.tag) orelse return;
-        if (slotContextProps(provider_component) == null) return;
+        if (self.componentEffectiveSlotContextProps(provider_component) == null) return;
         for (node.children) |child| {
             const child_idx = switch (child) {
                 .node_index => |child_idx| child_idx,
@@ -5059,6 +5394,7 @@ pub const SaxLowerer = struct {
             defer self.allocator.free(prefix);
             try out.writer().print("  {s} = load dom+{s} as ptr\n", .{ child_ctx_var, child_slot });
             try self.emitInheritedContextProps(out, node, child_node, provider_ctx_var, child_ctx_var, prefix);
+            try out.writer().print("  !{s}\n", .{child_ctx_var});
         }
     }
 
@@ -5076,7 +5412,7 @@ pub const SaxLowerer = struct {
                 .node_index => |child_idx| {
                     const child_node = self.component.dom_nodes[child_idx];
                     if (child_node.is_user_component) {
-                        try self.emitUserComponentMount(out, child_idx, node_var, "ctx", null, null);
+                        try self.emitUserComponentMount(out, child_idx, node_var, "ctx", null, null, false);
                     } else {
                         const child_var = try std.fmt.allocPrint(self.allocator, "node_{d}", .{child_idx});
                         defer self.allocator.free(child_var);
@@ -5261,6 +5597,7 @@ pub const SaxLowerer = struct {
             try out.writer().print("  call @sax_{s}_render({s})\n", .{ stem, node_var });
             try self.emitUserComponentContextPropUpdatesForChildren(out, node, idx, node_var);
             try self.emitProjectedTextChildRender(out, node, idx);
+            try out.writer().print("  !{s}\n", .{node_var});
             return;
         }
         try out.writer().print("  {s} = load dom+{s} as ptr\n", .{ node_var, node_slot });
@@ -5270,6 +5607,7 @@ pub const SaxLowerer = struct {
         } else {
             try self.emitTextPieceBuffer(out, node, node_var);
         }
+        try out.writer().print("  !{s}\n", .{node_var});
     }
 
     fn emitSeparateTextNodeRender(self: *SaxLowerer, out: *std.ArrayList(u8), node: parser.DomNode, idx: usize) !void {
@@ -5455,6 +5793,24 @@ pub const SaxLowerer = struct {
 
     fn emitInterpolatedValue(self: *SaxLowerer, out: *std.ArrayList(u8), node_var: []const u8, key_name: []const u8, expr: parser.Expr, is_attr: bool, use_value_property: bool) !void {
         if (is_attr) {
+            if (!use_value_property) {
+                if (self.parseStaticStringTernary(expr)) |ternary| {
+                    const key_idx = try self.string_pool.add(key_name);
+                    const key_const = try std.fmt.allocPrint(self.allocator, "sax_{s}_{d}", .{ self.component.name, key_idx });
+                    defer self.allocator.free(key_const);
+                    const ternary_prefix = try std.fmt.allocPrint(self.allocator, "attr_ternary_{s}_{s}", .{ node_var, key_name });
+                    defer self.allocator.free(ternary_prefix);
+                    const buf_name = try std.fmt.allocPrint(self.allocator, "attr_ternary_buf_{s}_{s}", .{ node_var, key_name });
+                    defer self.allocator.free(buf_name);
+                    const len_name = try std.fmt.allocPrint(self.allocator, "attr_ternary_len_{s}_{s}", .{ node_var, key_name });
+                    defer self.allocator.free(len_name);
+                    try out.writer().print("  {s} = stack_alloc {}\n", .{ buf_name, @max(@max(ternary.true_text.len, ternary.false_text.len), 1) });
+                    try out.writer().print("  {s} = 0\n", .{len_name});
+                    try self.emitStaticStringTernaryCopy(out, ternary, buf_name, len_name, ternary_prefix, 0);
+                    try out.writer().print("  call @sax_dom_set_attr({s}, *{s}, {}, *{s}, {s})\n", .{ node_var, key_const, key_name.len, buf_name, len_name });
+                    return;
+                }
+            }
             if (simpleStateExprName(expr)) |state_name| {
                 if (self.stateVar(state_name)) |sv| {
                     if (sv.ty == .ptr) {
@@ -5926,7 +6282,7 @@ pub const SaxLowerer = struct {
         for (self.component.root_nodes) |root_idx| {
             const root_node = self.component.dom_nodes[root_idx];
             if (root_node.is_user_component) {
-                try self.emitUserComponentMount(out, root_idx, parent_var, "ctx", null, null);
+                try self.emitUserComponentMount(out, root_idx, parent_var, "ctx", null, null, false);
             } else {
                 const root_var = try std.fmt.allocPrint(self.allocator, "node_{d}", .{root_idx});
                 defer self.allocator.free(root_var);
@@ -6151,6 +6507,7 @@ pub const SaxLowerer = struct {
             } else {
                 try out.writer().print("  call @sax_dom_remove_self({s})\n", .{node_var});
             }
+            try out.writer().print("  !{s}\n", .{node_var});
         }
         for (self.component.release_vars) |release_name| {
             try self.emitLoadState(out, release_name, release_name);
@@ -6177,6 +6534,22 @@ pub const SaxLowerer = struct {
     }
 
     pub fn lower(self: *SaxLowerer, out: *std.ArrayList(u8), options: LowerOptions) !void {
+        const shared_mode = options.shared_decls orelse if (options.emit_shared_decls) SharedDeclMode.full else SharedDeclMode.none;
+        if (shared_mode == .runtime_only) {
+            try self.appendExternDecls(out);
+            try self.appendComponentForwardDecls(out);
+            try self.appendStdImports(out);
+            try self.appendArrayAdapter(out);
+            if (options.emit_app_alias) {
+                const root_name = try self.componentStem();
+                defer self.allocator.free(root_name);
+                if (!std.mem.eql(u8, root_name, "app")) {
+                    try out.writer().print("@export sax_app_init() -> ptr:\nL_ENTRY:\n  ctx = call @sax_{s}_init()\n  return ctx\n\n", .{root_name});
+                }
+            }
+            return;
+        }
+
         const state_size_name = try self.stateSizeConstName();
         defer self.allocator.free(state_size_name);
         const dom_size_name = try self.domSizeConstName();
@@ -6216,11 +6589,19 @@ pub const SaxLowerer = struct {
         }
         if (self.component.dom_nodes.len != 0) try out.writer().writeByte('\n');
 
-        if (options.emit_shared_decls) {
-            try self.appendExternDecls(out);
-            try self.appendComponentForwardDecls(out);
-            try self.appendStdImports(out);
-            try self.appendArrayAdapter(out);
+        switch (shared_mode) {
+            .none => {},
+            .full => {
+                try self.appendExternDecls(out);
+                try self.appendComponentForwardDecls(out);
+                try self.appendStdImports(out);
+                try self.appendArrayAdapter(out);
+            },
+            .component_externs => {
+                try self.appendExternDecls(out);
+                try self.appendComponentForwardDecls(out);
+            },
+            .runtime_only => unreachable,
         }
         try self.emitInit(out);
         try self.emitMount(out);
@@ -6402,8 +6783,12 @@ test "lowerer dispatches onUnmount before recursive destroy and DOM removal" {
     const parent_unmount_pos = std.mem.indexOf(u8, parent_destroy, "call @sax_parent_onUnmount_ffi(ctx)") orelse return error.TestUnexpectedResult;
     const child_destroy_pos = std.mem.indexOf(u8, parent_destroy, "call @sax_child_destroy(node_1)") orelse return error.TestUnexpectedResult;
     const section_remove_pos = std.mem.indexOf(u8, parent_destroy, "call @sax_dom_remove_self(node_0)") orelse return error.TestUnexpectedResult;
+    const section_release_pos = std.mem.indexOf(u8, parent_destroy, "!node_0") orelse return error.TestUnexpectedResult;
+    const child_release_pos = std.mem.indexOf(u8, parent_destroy, "!node_1") orelse return error.TestUnexpectedResult;
     try std.testing.expect(parent_unmount_pos < section_remove_pos);
     try std.testing.expect(parent_unmount_pos < child_destroy_pos);
+    try std.testing.expect(section_remove_pos < section_release_pos);
+    try std.testing.expect(child_destroy_pos < child_release_pos);
 
     var child_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, program.components[1]);
     defer child_lowerer.deinit();
@@ -6417,7 +6802,9 @@ test "lowerer dispatches onUnmount before recursive destroy and DOM removal" {
     const child_destroy = child_out.items[child_destroy_start .. child_destroy_start + child_destroy_end];
     const child_unmount_pos = std.mem.indexOf(u8, child_destroy, "call @sax_child_onUnmount_ffi(ctx)") orelse return error.TestUnexpectedResult;
     const child_dom_remove_pos = std.mem.indexOf(u8, child_destroy, "call @sax_dom_remove_self(node_0)") orelse return error.TestUnexpectedResult;
+    const child_dom_release_pos = std.mem.indexOf(u8, child_destroy, "!node_0") orelse return error.TestUnexpectedResult;
     try std.testing.expect(child_unmount_pos < child_dom_remove_pos);
+    try std.testing.expect(child_dom_remove_pos < child_dom_release_pos);
 }
 
 test "lowerer emits onUpdate after render triggers" {
@@ -6979,8 +7366,161 @@ test "lowerer projects slot context props before explicit child props" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "Child_ctx_0_state = load node_0+Provider_CTX_state as ptr") == null);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "Child_ctx_0_raw = load Child_ctx_0_state+0 as i1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_child_set_dense(node_1, Child_ctx_0_wide)"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "!context_child_"));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "Child_1_ctx_0_raw") == null);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_child_set_dense(node_2,"));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "utf8:\"contextProps\"") == null);
+}
+
+test "lowerer carries slot context props through transparent user components" {
+    const source =
+        \\<Component name="App">
+        \\  <Provider tone="secondary">
+        \\    <Wrapper>
+        \\      <Child>Inherited</Child>
+        \\    </Wrapper>
+        \\  </Provider>
+        \\</Component>
+        \\<Component name="Provider">
+        \\  <state>
+        \\    tone = 'primary' as ptr
+        \\    tone_len = 7
+        \\  </state>
+        \\  <section><Slot contextProps="tone" contextScope="descendants" /></section>
+        \\  !tone !tone_len
+        \\</Component>
+        \\<Component name="Wrapper">
+        \\  <div><Slot /></div>
+        \\</Component>
+        \\<Component name="Child">
+        \\  <state>
+        \\    tone = 'default' as ptr
+        \\    tone_len = 7
+        \\  </state>
+        \\  <p className="{tone == 'secondary' ? 'secondary' : ''}"><Slot /></p>
+        \\  !tone !tone_len
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+
+    for (program.components, 0..) |component, idx| {
+        var component_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, component);
+        defer component_lowerer.deinit();
+        try component_lowerer.lower(&out, .{ .emit_shared_decls = idx == 0 });
+    }
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "Child_ctx_0_state = load node_0+0 as ptr"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_child_set_tone_str(node_2, *Child_ctx_0_ptr, Child_ctx_0_len)"));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "call @sax_child_set_tone(node_2, *sax_App_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "utf8:\"contextProps\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "utf8:\"contextScope\"") == null);
+}
+
+test "lowerer treats provider-wrapped slots as context sources" {
+    const source =
+        \\<Component name="App">
+        \\  <Wrapper tone="secondary">
+        \\    <Child>Inherited</Child>
+        \\  </Wrapper>
+        \\</Component>
+        \\<Component name="Wrapper">
+        \\  <state>
+        \\    tone = 'primary' as ptr
+        \\    tone_len = 7
+        \\  </state>
+        \\  <Provider tone={tone}>
+        \\    <Slot />
+        \\  </Provider>
+        \\  !tone !tone_len
+        \\</Component>
+        \\<Component name="Provider">
+        \\  <state>
+        \\    tone = 'primary' as ptr
+        \\    tone_len = 7
+        \\  </state>
+        \\  <section><Slot contextProps="tone" contextScope="descendants" /></section>
+        \\  !tone !tone_len
+        \\</Component>
+        \\<Component name="Child">
+        \\  <state>
+        \\    tone = 'default' as ptr
+        \\    tone_len = 7
+        \\  </state>
+        \\  <p className="{tone == 'secondary' ? 'secondary' : ''}"><Slot /></p>
+        \\  !tone !tone_len
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+
+    for (program.components, 0..) |component, idx| {
+        var component_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, component);
+        defer component_lowerer.deinit();
+        try component_lowerer.lower(&out, .{ .emit_shared_decls = idx == 0 });
+    }
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "Child_ctx_0_state = load node_0+0 as ptr"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_child_set_tone_str(node_1, *Child_ctx_0_ptr, Child_ctx_0_len)"));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "call @sax_child_set_tone(node_1, *sax_App_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "utf8:\"contextProps\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "utf8:\"contextScope\"") == null);
+}
+
+test "lowerer keeps slot context props direct by default" {
+    const source =
+        \\<Component name="App">
+        \\  <Provider tone="secondary">
+        \\    <Wrapper>
+        \\      <Child>Default direct scope</Child>
+        \\    </Wrapper>
+        \\  </Provider>
+        \\</Component>
+        \\<Component name="Provider">
+        \\  <state>
+        \\    tone = 'primary' as ptr
+        \\    tone_len = 7
+        \\  </state>
+        \\  <section><Slot contextProps="tone" /></section>
+        \\  !tone !tone_len
+        \\</Component>
+        \\<Component name="Wrapper">
+        \\  <div><Slot /></div>
+        \\</Component>
+        \\<Component name="Child">
+        \\  <state>
+        \\    tone = 'default' as ptr
+        \\    tone_len = 7
+        \\  </state>
+        \\  <p className="{tone == 'secondary' ? 'secondary' : ''}"><Slot /></p>
+        \\  !tone !tone_len
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+
+    for (program.components, 0..) |component, idx| {
+        var component_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, component);
+        defer component_lowerer.deinit();
+        try component_lowerer.lower(&out, .{ .emit_shared_decls = idx == 0 });
+    }
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "call @sax_child_set_tone_str(node_2") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "utf8:\"contextProps\"") == null);
 }
 
@@ -7026,6 +7566,7 @@ test "lowerer refreshes direct projected text children for user components" {
     const inc_block = out.items[inc_start .. inc_start + inc_end];
     try std.testing.expect(std.mem.containsAtLeast(u8, inc_block, 1, "projected_text_render_0_1 = load dom+sax_App_node_Layout_text_1 as i64"));
     try std.testing.expect(std.mem.containsAtLeast(u8, inc_block, 1, "call @sax_dom_set_text(projected_text_render_0_1,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, inc_block, 1, "!node_0"));
 }
 
 test "lowerer removes slotted text-node handles during destroy" {
@@ -7061,6 +7602,8 @@ test "lowerer removes slotted text-node handles during destroy" {
     try std.testing.expect(std.mem.containsAtLeast(u8, destroy_block, 1, "call @sax_dom_remove_self(text_node_destroy_0_0)"));
     try std.testing.expect(std.mem.containsAtLeast(u8, destroy_block, 1, "text_node_destroy_2_0 = load dom+sax_App_node_Layout_text_0 as i64"));
     try std.testing.expect(std.mem.containsAtLeast(u8, destroy_block, 1, "text_node_destroy_2_1 = load dom+sax_App_node_Layout_text_1 as i64"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, destroy_block, 1, "!node_0"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, destroy_block, 1, "!node_2"));
     const projected_text_remove_pos = std.mem.indexOf(u8, destroy_block, "call @sax_dom_remove_self(text_node_destroy_2_1)") orelse return error.TestUnexpectedResult;
     const child_destroy_pos = std.mem.indexOf(u8, destroy_block, "call @sax_layout_destroy(node_2)") orelse return error.TestUnexpectedResult;
     try std.testing.expect(projected_text_remove_pos < child_destroy_pos);
@@ -7148,7 +7691,7 @@ test "lowerer emits ternary string prop setter calls for user components" {
 test "lowerer maps normalized React prop aliases into user component state" {
     const source =
         \\<Component name="App">
-        \\  <Field readOnly autoFocus className="dense" />
+        \\  <Field readOnly autoFocus className="dense" aria-label="Name" aria-labelledby="field-title" aria-describedby="field-helper" />
         \\</Component>
         \\<Component name="Field">
         \\  <state>
@@ -7156,9 +7699,15 @@ test "lowerer maps normalized React prop aliases into user component state" {
         \\    autoFocus = 0 as i1
         \\    className = alloc 32
         \\    className_len = 0
+        \\    ariaLabel = alloc 64
+        \\    ariaLabel_len = 0
+        \\    ariaLabelledby = alloc 64
+        \\    ariaLabelledby_len = 0
+        \\    ariaDescribedby = alloc 64
+        \\    ariaDescribedby_len = 0
         \\  </state>
-        \\  <input readonly={readOnly} className="{className}" />
-        \\  !readOnly !autoFocus !className !className_len
+        \\  <input readonly={readOnly} className="{className}" aria-label="{ariaLabel}" aria-labelledby="{ariaLabelledby}" aria-describedby="{ariaDescribedby}" />
+        \\  !readOnly !autoFocus !className !className_len !ariaLabel !ariaLabel_len !ariaLabelledby !ariaLabelledby_len !ariaDescribedby !ariaDescribedby_len
         \\</Component>
     ;
 
@@ -7176,6 +7725,9 @@ test "lowerer maps normalized React prop aliases into user component state" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_field_set_readOnly(node_0, 1)"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_field_set_autoFocus(node_0, 1)"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_field_set_className_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_field_set_ariaLabel_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_field_set_ariaLabelledby_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_field_set_ariaDescribedby_str(node_0,"));
     try std.testing.expect(std.mem.indexOf(u8, out.items, "sax_field_set_readonly") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "sax_field_set_autofocus") == null);
 }
@@ -7324,6 +7876,61 @@ test "lowerer passes static object props into child ptr state" {
 
     try std.testing.expect(std.mem.containsAtLeast(u8, widget_out.items, 1, "@export sax_widget_set_config_str(ctx: ptr, src: ptr, len: i64):"));
     try std.testing.expect(std.mem.containsAtLeast(u8, widget_out.items, 1, "store state+Widget_config_len, len as i64"));
+}
+
+test "lowerer projects MUI classes and slotProps className objects into slot states" {
+    const source =
+        \\<Component name="App">
+        \\  <Menu classes={{ root: "menu-root-class", paper: "menu-paper-class", list: "menu-list-class" }} slotProps={{ root: { className: "menu-root-slot" }, paper: { className: "menu-paper-slot" }, list: { className: "menu-list-slot" } }}>
+        \\    <MenuItem>Action</MenuItem>
+        \\  </Menu>
+        \\</Component>
+        \\<Component name="Menu">
+        \\  <state>
+        \\    classesRoot = alloc 128
+        \\    classesRoot_len = 0
+        \\    classesPaper = alloc 128
+        \\    classesPaper_len = 0
+        \\    classesList = alloc 128
+        \\    classesList_len = 0
+        \\    slotPropsRootClassName = alloc 128
+        \\    slotPropsRootClassName_len = 0
+        \\    slotPropsPaperClassName = alloc 128
+        \\    slotPropsPaperClassName_len = 0
+        \\    slotPropsListClassName = alloc 128
+        \\    slotPropsListClassName_len = 0
+        \\  </state>
+        \\  <div className="MuiMenu-root {classesRoot} {slotPropsRootClassName}">
+        \\    <div className="MuiMenu-paper {classesPaper} {slotPropsPaperClassName}">
+        \\      <ul className="MuiMenu-list {classesList} {slotPropsListClassName}">
+        \\        <Slot />
+        \\      </ul>
+        \\    </div>
+        \\  </div>
+        \\  !classesRoot !classesRoot_len !classesPaper !classesPaper_len !classesList !classesList_len !slotPropsRootClassName !slotPropsRootClassName_len !slotPropsPaperClassName !slotPropsPaperClassName_len !slotPropsListClassName !slotPropsListClassName_len
+        \\</Component>
+        \\<Component name="MenuItem">
+        \\  <li className="MuiMenuItem-root"><Slot /></li>
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var app_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, program.components[0]);
+    defer app_lowerer.deinit();
+
+    var app_out = std.ArrayList(u8).init(std.testing.allocator);
+    defer app_out.deinit();
+    try app_lowerer.lower(&app_out, .{});
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, app_out.items, 1, "call @sax_menu_set_classesRoot_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, app_out.items, 1, "call @sax_menu_set_classesPaper_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, app_out.items, 1, "call @sax_menu_set_classesList_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, app_out.items, 1, "call @sax_menu_set_slotPropsRootClassName_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, app_out.items, 1, "call @sax_menu_set_slotPropsPaperClassName_str(node_0,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, app_out.items, 1, "call @sax_menu_set_slotPropsListClassName_str(node_0,"));
 }
 
 test "lowerer passes dynamic numeric object props into child ptr state" {
@@ -7671,6 +8278,36 @@ test "lowerer emits static string ternary pieces inside DOM attr templates" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_set_str_prop(node_0,"));
 }
 
+test "lowerer emits static string ternary for whole DOM attr interpolation" {
+    const source =
+        \\<Component name="AriaLab">
+        \\  <state>
+        \\    open = 0 as i1
+        \\  </state>
+        \\  <div aria-hidden="{open ? 'false' : 'true'}">Overlay</div>
+        \\  !open
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var lowerer = try SaxLowerer.init(std.testing.allocator, program.components[0]);
+    defer lowerer.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    try lowerer.lower(&out, .{});
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "attr_ternary_buf_node_0_aria-hidden = stack_alloc"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " = load state+AriaLab_open as i1"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"aria-hidden\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"false\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"true\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_set_attr(node_0,"));
+}
+
 test "lowerer emits truthy and-and ternary pieces inside DOM attr templates" {
     const source =
         \\<Component name="ClassLab">
@@ -7835,6 +8472,63 @@ test "lowerer emits mixed ptr-and-int equality ternary pieces inside DOM attr te
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_set_str_prop(node_0,"));
 }
 
+test "lowerer accepts Grid ownerState class templates" {
+    const source =
+        \\<Component name="GridSmoke">
+        \\  <section className="mui-grid-smoke">
+        \\    <Grid container spacing={2} direction="row-reverse" wrap="wrap-reverse" className="mui-grid-owner-state">
+        \\      <Grid size={6}>Grid half item</Grid>
+        \\      <Grid size={12}>Grid full item</Grid>
+        \\    </Grid>
+        \\  </section>
+        \\</Component>
+        \\
+        \\<Component name="Grid">
+        \\  <state>
+        \\    className = alloc 256
+        \\    className_len = 0
+        \\    columns = 12
+        \\    columnSpacing = 0
+        \\    container = 0 as i1
+        \\    direction = 'row' as ptr
+        \\    direction_len = 3
+        \\    offset = 0
+        \\    rowSpacing = 0
+        \\    size = 0
+        \\    spacing = 0
+        \\    wrap = 'wrap' as ptr
+        \\    wrap_len = 4
+        \\  </state>
+        \\  <div className="MuiGrid-root{container ? ' MuiGrid-container' : ''}{wrap == 'nowrap' ? ' MuiGrid-wrap-xs-nowrap' : ''}{wrap == 'wrap-reverse' ? ' MuiGrid-wrap-xs-wrap-reverse' : ''}{direction == 'row' ? ' MuiGrid-direction-xs-row' : ''}{direction == 'row-reverse' ? ' MuiGrid-direction-xs-row-reverse' : ''}{direction == 'column' ? ' MuiGrid-direction-xs-column' : ''}{direction == 'column-reverse' ? ' MuiGrid-direction-xs-column-reverse' : ''}{size == 1 ? ' MuiGrid-grid-xs-1' : ''}{size == 2 ? ' MuiGrid-grid-xs-2' : ''}{size == 3 ? ' MuiGrid-grid-xs-3' : ''}{size == 4 ? ' MuiGrid-grid-xs-4' : ''}{size == 5 ? ' MuiGrid-grid-xs-5' : ''}{size == 6 ? ' MuiGrid-grid-xs-6' : ''}{size == 7 ? ' MuiGrid-grid-xs-7' : ''}{size == 8 ? ' MuiGrid-grid-xs-8' : ''}{size == 9 ? ' MuiGrid-grid-xs-9' : ''}{size == 10 ? ' MuiGrid-grid-xs-10' : ''}{size == 11 ? ' MuiGrid-grid-xs-11' : ''}{size == 12 ? ' MuiGrid-grid-xs-12' : ''}{container && spacing == 1 ? ' MuiGrid-spacing-xs-1' : ''}{container && spacing == 2 ? ' MuiGrid-spacing-xs-2' : ''}{container && spacing == 3 ? ' MuiGrid-spacing-xs-3' : ''}{container && spacing == 4 ? ' MuiGrid-spacing-xs-4' : ''}{container && spacing == 5 ? ' MuiGrid-spacing-xs-5' : ''}{container && spacing == 6 ? ' MuiGrid-spacing-xs-6' : ''}{container && spacing == 7 ? ' MuiGrid-spacing-xs-7' : ''}{container && spacing == 8 ? ' MuiGrid-spacing-xs-8' : ''}{container && spacing == 9 ? ' MuiGrid-spacing-xs-9' : ''}{container && spacing == 10 ? ' MuiGrid-spacing-xs-10' : ''}{container && spacing == 11 ? ' MuiGrid-spacing-xs-11' : ''}{container && spacing == 12 ? ' MuiGrid-spacing-xs-12' : ''} {className}">
+        \\    <Slot />
+        \\  </div>
+        \\  !className !className_len !columns !columnSpacing !container !direction !direction_len !offset !rowSpacing !size !spacing !wrap !wrap_len
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, program.components[1]);
+    defer lowerer.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    try lowerer.lower(&out, .{});
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "load state+Grid_wrap as ptr"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "load state+Grid_direction as ptr"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "load state+Grid_size as i64"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "load state+Grid_spacing as i64"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "load state+Grid_container as i1"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\" MuiGrid-wrap-xs-wrap-reverse\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\" MuiGrid-direction-xs-row-reverse\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\" MuiGrid-grid-xs-6\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\" MuiGrid-spacing-xs-2\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_set_str_prop(node_0,"));
+}
+
 test "lowerer accepts MobileStepper ownerState variant class templates" {
     const source =
         \\<Component name="MobileStepper">
@@ -7910,6 +8604,35 @@ test "lowerer accepts JSX braced attrs and boolean shorthand props" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_set_value(node_0,"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_badge_set_count(node_1,"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_badge_set_active(node_1, 1)"));
+}
+
+test "lowerer accepts boolean literal interpolations for user component props" {
+    const source =
+        \\<Component name="App">
+        \\  <Alert icon={false} />
+        \\</Component>
+        \\<Component name="Alert">
+        \\  <state>
+        \\    icon = 1 as i1
+        \\  </state>
+        \\  <div>{icon}</div>
+        \\  !icon
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var app_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, program.components[0]);
+    defer app_lowerer.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+    try app_lowerer.lower(&out, .{});
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_alert_set_icon(node_0, 0)"));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "UnknownStateVar") == null);
 }
 
 test "lowerer emits controlled value property updates for form elements" {
@@ -9343,6 +10066,37 @@ test "lowerer maps React mouse enter and leave capture aliases to DOM events" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "utf8:\"mouseleavecapture\"") == null);
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_bind_event(node_0,"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_bind_event_capture(node_0,"));
+}
+
+test "lowerer maps synthetic onClickAway to click away binding" {
+    const source =
+        \\<Component name="App">
+        \\  <Action onClickAway={close_menu}>Projected</Action>
+        \\  @close_menu:
+        \\  L_ENTRY:
+        \\    ret
+        \\</Component>
+        \\<Component name="Action">
+        \\  <div><Slot /></div>
+        \\</Component>
+    ;
+
+    var sax_parser = parser.SaxParser.init(std.testing.allocator, source);
+    var program = try sax_parser.parse();
+    defer program.deinit();
+
+    var out = std.ArrayList(u8).init(std.testing.allocator);
+    defer out.deinit();
+
+    for (program.components, 0..) |component, idx| {
+        var component_lowerer = try SaxLowerer.initWithProgram(std.testing.allocator, program.components, component);
+        defer component_lowerer.deinit();
+        try component_lowerer.lower(&out, .{ .emit_shared_decls = idx == 0 });
+    }
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "utf8:\"clickaway\""));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "call @sax_dom_bind_event(node_0_root,"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "@export sax_app_close_menu(ctx: ptr):"));
 }
 
 test "lowerer stores DOM handles for state refs on mount" {
