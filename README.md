@@ -14,15 +14,15 @@ For an input such as `demos/react_counter.sax`, the build command generates:
 ## Example
 
 ```bash
-SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react build demos/react_counter.sax --out-dir /tmp/react-counter
+SA_PLUGIN_DEV=1 SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react build demos/react_counter.sax --out-dir /tmp/react-counter
 ```
 
 React/SAX also supports opt-in Sla handlers using `fn name() { ... }` while preserving existing SA label handlers. The focused Sla demo is `demos/react_counter_sla.sax`:
 
 ```bash
 zig build test
-SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react check demos/react_counter_sla.sax
-SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react build demos/react_counter_sla.sax --out-dir zig-out/react-counter-sla-browser
+SA_PLUGIN_DEV=1 SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react check demos/react_counter_sla.sax
+SA_PLUGIN_DEV=1 SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react build demos/react_counter_sla.sax --out-dir zig-out/react-counter-sla-browser
 ```
 
 Sla event handlers can read state fields directly, call `render()`, call `sax_get_time()`, and use injected React event values such as `checked`, `current_checked`, `current_value`, `current_value_len`, and `sax_event_target_value_i64()` for focused UI handlers.
@@ -30,13 +30,13 @@ Sla event handlers can read state fields directly, call `render()`, call `sax_ge
 Additional component source files can be composed into the same SAX program with `--include` or `-I`:
 
 ```bash
-SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react check app.sax --include lib/components.sax
+SA_PLUGIN_DEV=1 SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react check app.sax --include lib/components.sax
 ```
 
 Includes are resolved first relative to the root `.sax` file. If that file is not present, React also searches `SA_REACT_INCLUDE_PATH`, share directories inferred from `SA_PLUGINS_PATH`, installed plugin share directories under `$SA_PLUGINS_HOME/installed/<plugin>/current/share`, and the local development plugin workspace. This allows a plugin that only installs SAX assets, for example `mui/material.sax`, to be consumed without adding a plugin-specific source expander:
 
 ```bash
-SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so:/home/vscode/projects/sa_plugins/sa_plugin_mui/zig-out/lib/libmui.so /home/vscode/projects/sci/zig-out/bin/sa react check demos/mui_all_components_from_library.sax --include mui/material.sax
+SA_PLUGIN_DEV=1 SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so:/home/vscode/projects/sa_plugins/sa_plugin_mui/zig-out/lib/libmui.so /home/vscode/projects/sci/zig-out/bin/sa react check demos/mui_all_components_from_library.sax --include mui/material.sax
 ```
 
 ## Current scope
