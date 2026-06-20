@@ -624,6 +624,11 @@ pub fn buildBrowserWasmFromSourceText(
         return 0;
     }
 
+    const start_time = std.time.milliTimestamp();
+    var compile_bc_ms: i64 = 0;
+    var compile_obj_ms: i64 = 0;
+
+    const compiled_start = std.time.milliTimestamp();
     const compiled = try compileSourceText(allocator, source_path, source_text, options);
     switch (compiled) {
         .trap => |report| {
@@ -633,6 +638,7 @@ pub fn buildBrowserWasmFromSourceText(
         .ok => |ok| {
             var owned = ok;
             defer owned.deinit(allocator);
+            compile_bc_ms += std.time.milliTimestamp() - compiled_start;
 
             const stable_hash = try getBrowserWasmIncrementalCacheKey(allocator, debug, optimization, options.dce, exports, std_root);
             var stable_hash_hex: [64]u8 = undefined;
@@ -671,7 +677,11 @@ pub fn buildBrowserWasmFromSourceText(
                             const func_bc_path = try std.fmt.allocPrint(allocator, "{s}/functions/{s}.sa.bc", .{ fn_cache_dir, function_key });
                             errdefer allocator.free(func_bc_path);
 
+                            const func_o_path = try std.fmt.allocPrint(allocator, "{s}/functions/{s}.sa.o", .{ fn_cache_dir, function_key });
+                            errdefer allocator.free(func_o_path);
+
                             if (!filePresentNonEmpty(func_bc_path)) {
+                                const bc_start = std.time.milliTimestamp();
                                 try ensureParentDir(func_bc_path);
                                 const opt_level = switch (optimization) {
                                     .release_small => @as(u8, 1),
@@ -696,9 +706,26 @@ pub fn buildBrowserWasmFromSourceText(
                                     },
                                     func_bc_path,
                                 );
+                                compile_bc_ms += std.time.milliTimestamp() - bc_start;
                             }
 
-                            try bitcode_paths.append(func_bc_path);
+                            if (!filePresentNonEmpty(func_o_path)) {
+                                const obj_start = std.time.milliTimestamp();
+                                try ensureParentDir(func_o_path);
+                                try driver.compileWasmObj(
+                                    allocator,
+                                    func_bc_path,
+                                    func_o_path,
+                                    .{ .triple = "wasm32-freestanding" },
+                                    optimization,
+                                    debug,
+                                    stderr,
+                                );
+                                compile_obj_ms += std.time.milliTimestamp() - obj_start;
+                            }
+
+                            try bitcode_paths.append(func_o_path);
+                            allocator.free(func_bc_path);
                         }
 
                         task_idx += 1;
@@ -713,6 +740,7 @@ pub fn buildBrowserWasmFromSourceText(
             }
 
             try ensureParentDir(artifact_path);
+            const link_start = std.time.milliTimestamp();
             driver.compileWasm(
                 allocator,
                 bitcode_paths.items,
@@ -725,6 +753,9 @@ pub fn buildBrowserWasmFromSourceText(
                 error.ChildProcessFailed => return 1,
                 else => return err,
             };
+            const link_ms = std.time.milliTimestamp() - link_start;
+            const total_time = std.time.milliTimestamp() - start_time;
+            try stderr.print("  [vite] browser wasm generated in {d}ms (lowering/emission: {d}ms, object compilation: {d}ms, link: {d}ms)\n", .{ total_time, compile_bc_ms, compile_obj_ms, link_ms });
 
             if (std.fs.path.dirname(cached_wasm)) |dir| {
                 if (dir.len != 0) std.fs.cwd().makePath(dir) catch {};
@@ -870,6 +901,10 @@ pub fn buildBrowserWasmFromSourceUnits(
         return 0;
     }
 
+    const start_time = std.time.milliTimestamp();
+    var compile_bc_ms: i64 = 0;
+    var compile_obj_ms: i64 = 0;
+
     const stable_hash = try getBrowserWasmIncrementalCacheKey(allocator, debug, optimization, options.dce, exports, std_root);
     var stable_hash_hex: [64]u8 = undefined;
     _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&stable_hash)}) catch unreachable;
@@ -896,10 +931,16 @@ pub fn buildBrowserWasmFromSourceUnits(
         const unit_bc_path = try std.fmt.allocPrint(allocator, "{s}/units/{s}.sa.bc", .{ unit_cache_dir, unit_key });
         errdefer allocator.free(unit_bc_path);
 
+        const unit_o_path = try std.fmt.allocPrint(allocator, "{s}/units/{s}.sa.o", .{ unit_cache_dir, unit_key });
+        errdefer allocator.free(unit_o_path);
+
         if (!filePresentNonEmpty(unit_bc_path)) {
+            const bc_start = std.time.milliTimestamp();
             const compiled = try compileSourceText(allocator, unit.source_path, unit.source_text, .{ .jobs = 1, .dce = options.dce });
             switch (compiled) {
                 .trap => |report| {
+                    allocator.free(unit_bc_path);
+                    allocator.free(unit_o_path);
                     try printTrapReport(stderr, report);
                     return 1;
                 },
@@ -920,12 +961,30 @@ pub fn buildBrowserWasmFromSourceUnits(
                     );
                 },
             }
+            compile_bc_ms += std.time.milliTimestamp() - bc_start;
         }
 
-        try bitcode_paths.append(unit_bc_path);
+        if (!filePresentNonEmpty(unit_o_path)) {
+            const obj_start = std.time.milliTimestamp();
+            try ensureParentDir(unit_o_path);
+            try driver.compileWasmObj(
+                allocator,
+                unit_bc_path,
+                unit_o_path,
+                .{ .triple = "wasm32-freestanding" },
+                optimization,
+                debug,
+                stderr,
+            );
+            compile_obj_ms += std.time.milliTimestamp() - obj_start;
+        }
+
+        try bitcode_paths.append(unit_o_path);
+        allocator.free(unit_bc_path);
     }
 
     try ensureParentDir(out_path);
+    const link_start = std.time.milliTimestamp();
     driver.compileWasm(
         allocator,
         bitcode_paths.items,
@@ -938,6 +997,9 @@ pub fn buildBrowserWasmFromSourceUnits(
         error.ChildProcessFailed => return 1,
         else => return err,
     };
+    const link_ms = std.time.milliTimestamp() - link_start;
+    const total_time = std.time.milliTimestamp() - start_time;
+    try stderr.print("  [vite] browser wasm generated in {d}ms (lowering/emission: {d}ms, object compilation: {d}ms, link: {d}ms)\n", .{ total_time, compile_bc_ms, compile_obj_ms, link_ms });
 
     if (std.fs.path.dirname(cached_wasm)) |dir| {
         if (dir.len != 0) std.fs.cwd().makePath(dir) catch {};

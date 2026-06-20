@@ -325,6 +325,87 @@ pub fn compileWasm(
     }
 }
 
+pub fn argvForWasmObj(
+    allocator: std.mem.Allocator,
+    artifact_path: []const u8,
+    out_path: []const u8,
+    target: Target,
+    optimization: Optimization,
+    debug: bool,
+) !WasmArgv {
+    var argv = std.ArrayList([]const u8).init(allocator);
+    errdefer argv.deinit();
+
+    var owned_args = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (owned_args.items) |arg| allocator.free(arg);
+        owned_args.deinit();
+    }
+
+    try argv.appendSlice(&.{ "zig", "build-obj", artifact_path });
+    if (debug) {
+        try argv.append("-g");
+    }
+
+    try argv.appendSlice(&.{ "-target", target.triple });
+
+    try argv.append("-O");
+    try argv.append(if (debug) "Debug" else switch (optimization) {
+        .release_small => "ReleaseSmall",
+        .release_fast => "ReleaseFast",
+    });
+
+    const emit_bin = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{out_path});
+    var emit_bin_owned = false;
+    errdefer if (!emit_bin_owned) allocator.free(emit_bin);
+    try owned_args.append(emit_bin);
+    emit_bin_owned = true;
+    try argv.append(emit_bin);
+
+    const items = try argv.toOwnedSlice();
+    errdefer allocator.free(items);
+    const owned = try owned_args.toOwnedSlice();
+
+    return .{
+        .allocator = allocator,
+        .items = items,
+        .owned_args = owned,
+    };
+}
+
+pub fn compileWasmObj(
+    allocator: std.mem.Allocator,
+    artifact_path: []const u8,
+    out_path: []const u8,
+    target: Target,
+    optimization: Optimization,
+    debug: bool,
+    stderr: anytype,
+) !void {
+    var argv = try argvForWasmObj(allocator, artifact_path, out_path, target, optimization, debug);
+    defer argv.deinit();
+    const argv_slice = argv.slice();
+    const term = runProcessFast(allocator, argv_slice) catch |err| {
+        try printCompilerLaunchFailure(stderr, argv_slice, "compiling wasm object", artifact_path, out_path, err);
+        return CompileError.ChildProcessFailed;
+    };
+
+    const failed = switch (term) {
+        .Exited => |code| code != 0,
+        else => true,
+    };
+    if (failed) {
+        const result = runProcess(allocator, argv_slice) catch |err| {
+            try printCompilerLaunchFailure(stderr, argv_slice, "compiling wasm object", artifact_path, out_path, err);
+            return CompileError.ChildProcessFailed;
+        };
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try printCompilerFailure(stderr, argv_slice, "compiling wasm object", artifact_path, out_path, result);
+        return CompileError.ChildProcessFailed;
+    }
+}
+
 test "argv helpers choose the requested optimization" {
     const exe_small = argvForExe("input.bc", "out.exe", .release_small, "/repo/artifacts/sa_std/libsa_std.a", &.{}, false);
     try std.testing.expectEqualStrings("-O1", exe_small.slice()[2]);

@@ -89,6 +89,7 @@ const ReactSourceOptions = struct {
 const ShardedSaxArtifacts = struct {
     shared_sa_code: std.ArrayList(u8),
     component_sa_codes: std.ArrayList(std.ArrayList(u8)),
+    component_names: std.ArrayList([]const u8),
     airlock_js: std.ArrayList(u8),
     wgpu_airlock_js: ?std.ArrayList(u8),
     sa3d_airlock_js: ?std.ArrayList(u8),
@@ -98,12 +99,14 @@ const ShardedSaxArtifacts = struct {
         self.shared_sa_code.deinit();
         for (self.component_sa_codes.items) |*code| code.deinit();
         self.component_sa_codes.deinit();
+        for (self.component_names.items) |name| allocator.free(name);
+        self.component_names.deinit();
         self.airlock_js.deinit();
         if (self.wgpu_airlock_js) |*js| js.deinit();
         if (self.sa3d_airlock_js) |*js| js.deinit();
         self.index_html.deinit();
         self.* = undefined;
-        _ = allocator;
+        
     }
 };
 
@@ -910,6 +913,12 @@ fn compileSaxArtifactsSharded(
         component_sa_codes.deinit();
     }
 
+    var component_names = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (component_names.items) |name| allocator.free(name);
+        component_names.deinit();
+    }
+
     for (reachable_components) |component| {
         var component_code = std.ArrayList(u8).init(allocator);
         errdefer component_code.deinit();
@@ -921,6 +930,10 @@ fn compileSaxArtifactsSharded(
             return err;
         };
         try component_sa_codes.append(component_code);
+
+        const name_dupe = try allocator.dupe(u8, component.name);
+        errdefer allocator.free(name_dupe);
+        try component_names.append(name_dupe);
     }
 
     var airlock_generator = airlock_gen.AirlockGenerator.init(allocator);
@@ -933,6 +946,7 @@ fn compileSaxArtifactsSharded(
     return .{
         .shared_sa_code = shared_sa_code,
         .component_sa_codes = component_sa_codes,
+        .component_names = component_names,
         .airlock_js = airlock_js,
         .wgpu_airlock_js = null,
         .sa3d_airlock_js = null,
@@ -1006,7 +1020,7 @@ fn shardedArtifactsToSourceUnits(
     });
 
     for (artifacts.component_sa_codes.items, 0..) |component_code, idx| {
-        const logical_name = try std.fmt.allocPrint(allocator, "component_{d}", .{idx});
+        const logical_name = try allocator.dupe(u8, artifacts.component_names.items[idx]);
         errdefer allocator.free(logical_name);
         try units.append(.{
             .logical_name = logical_name,
