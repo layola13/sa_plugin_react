@@ -85,6 +85,20 @@ fn toSlaHandlerStateType(ty: parser.StateType) sla_handler_bridge.HandlerStateTy
     };
 }
 
+fn componentHasSlaHandlers(component: parser.Component) bool {
+    for (component.handlers) |handler| {
+        if (handler.language == .sla) return true;
+    }
+    return false;
+}
+
+fn releaseListContains(names: []const []const u8, needle: []const u8) bool {
+    for (names) |name| {
+        if (std.mem.eql(u8, name, needle)) return true;
+    }
+    return false;
+}
+
 const react_sla_ambient_bindings = [_]sla_handler_bridge.HandlerAmbientBinding{
     .{ .name = "checked", .ty = .i1 },
     .{ .name = "current_checked", .ty = .i1 },
@@ -6714,6 +6728,13 @@ pub const SaxLowerer = struct {
         for (self.component.release_vars) |release_name| {
             try self.emitLoadState(out, release_name, release_name);
             try out.writer().print("  !{s}\n", .{release_name});
+        }
+        if (componentHasSlaHandlers(self.component)) {
+            for (self.component.state_vars) |sv| {
+                if (releaseListContains(self.component.release_vars, sv.name)) continue;
+                try self.emitLoadState(out, sv.name, sv.name);
+                try out.writer().print("  !{s}\n", .{sv.name});
+            }
         }
         try out.writer().writeAll("  !dom\n  !state\n  !ctx\n");
         try out.writer().writeAll("  return\n\n");

@@ -17,7 +17,7 @@ For an input such as `demos/react_counter.sax`, the build command generates:
 SA_PLUGIN_DEV=1 SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react build demos/react_counter.sax --out-dir /tmp/react-counter
 ```
 
-React/SAX also supports opt-in Sla handlers using `fn name() { ... }` while preserving existing SA label handlers. The focused Sla demo is `demos/react_counter_sla.sax`:
+React/SAX also supports opt-in Sla handlers using `fn name() { ... }` while preserving existing SA label handlers. Components with Sla handlers use SAX destroy-time state cleanup, so Sla demos do not need explicit `!state_name` release lines. The focused Sla demo is `demos/react_counter_sla.sax`:
 
 ```bash
 zig build test

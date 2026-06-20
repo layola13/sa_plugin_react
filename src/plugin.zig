@@ -691,13 +691,20 @@ fn objectSpreadInterpolationIsInvalid(expr: parser.Expr) bool {
     return std.mem.indexOfScalar(u8, text[op_idx + 2 ..], '!') != null;
 }
 
+fn componentHasSlaHandlers(component: parser.Component) bool {
+    for (component.handlers) |handler| {
+        if (handler.language == .sla) return true;
+    }
+    return false;
+}
+
 fn findValidationFailure(allocator: std.mem.Allocator, component: parser.Component) ?ValidationFailure {
     var released = std.StringHashMap(void).init(allocator);
     defer released.deinit();
     for (component.release_vars) |name| released.put(name, {}) catch return null;
 
     for (component.state_vars) |sv| {
-        if (!released.contains(sv.name)) {
+        if (!componentHasSlaHandlers(component) and !released.contains(sv.name)) {
             return .{ .component_name = component.name, .err = .SaxStateLeak, .line = 1, .text = sv.name };
         }
     }
