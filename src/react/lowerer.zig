@@ -1,5 +1,6 @@
 const std = @import("std");
 const parser = @import("parser.zig");
+const sla_handler_bridge = @import("sla_handler_bridge");
 
 const Allocator = std.mem.Allocator;
 
@@ -73,6 +74,77 @@ fn stateInitValueExpr(init_expr: []const u8, ty: parser.StateType) []const u8 {
     }
     return trimmed;
 }
+
+fn toSlaHandlerStateType(ty: parser.StateType) sla_handler_bridge.HandlerStateType {
+    return switch (ty) {
+        .i1 => .i1,
+        .i32 => .i32,
+        .i64 => .i64,
+        .f64 => .f64,
+        .ptr => .ptr,
+    };
+}
+
+const react_sla_ambient_bindings = [_]sla_handler_bridge.HandlerAmbientBinding{
+    .{ .name = "checked", .ty = .i1 },
+    .{ .name = "current_checked", .ty = .i1 },
+    .{ .name = "default_prevented", .ty = .i1 },
+    .{ .name = "key_repeat", .ty = .i1 },
+    .{ .name = "pointer_primary", .ty = .i64 },
+    .{ .name = "ref_value", .ty = .i64 },
+    .{ .name = "target_value_i64", .ty = .i64 },
+    .{ .name = "pointer_id", .ty = .i64 },
+    .{ .name = "input_target", .ty = .i64 },
+    .{ .name = "submit_target", .ty = .i64 },
+    .{ .name = "related_target", .ty = .i64 },
+    .{ .name = "wheel_delta_x", .ty = .i64 },
+    .{ .name = "wheel_delta_y", .ty = .i64 },
+    .{ .name = "wheel_delta_z", .ty = .i64 },
+    .{ .name = "wheel_delta_mode", .ty = .i64 },
+    .{ .name = "touches_len", .ty = .i64 },
+    .{ .name = "touch_identifier", .ty = .i64 },
+    .{ .name = "touch_client_x", .ty = .i64 },
+    .{ .name = "touch_client_y", .ty = .i64 },
+    .{ .name = "event_time_stamp", .ty = .i64 },
+    .{ .name = "event_button", .ty = .i64 },
+    .{ .name = "event_client_x", .ty = .i64 },
+    .{ .name = "event_client_y", .ty = .i64 },
+    .{ .name = "event_page_x", .ty = .i64 },
+    .{ .name = "event_page_y", .ty = .i64 },
+    .{ .name = "event_screen_x", .ty = .i64 },
+    .{ .name = "event_screen_y", .ty = .i64 },
+    .{ .name = "event_modifiers", .ty = .i64 },
+    .{ .name = "current_value", .ty = .ptr },
+    .{ .name = "input_target_name", .ty = .ptr },
+    .{ .name = "input_target_id", .ty = .ptr },
+    .{ .name = "submit_target_name", .ty = .ptr },
+    .{ .name = "submit_target_id", .ty = .ptr },
+    .{ .name = "pointer_type", .ty = .ptr },
+    .{ .name = "selected_values", .ty = .ptr },
+    .{ .name = "clipboard_text", .ty = .ptr },
+    .{ .name = "drop_text", .ty = .ptr },
+    .{ .name = "before_input_data", .ty = .ptr },
+    .{ .name = "before_input_type", .ty = .ptr },
+    .{ .name = "related_target_name", .ty = .ptr },
+    .{ .name = "related_target_id", .ty = .ptr },
+    .{ .name = "key_value", .ty = .ptr },
+    .{ .name = "key_code", .ty = .ptr },
+    .{ .name = "current_value_len", .ty = .i64 },
+    .{ .name = "input_target_name_len", .ty = .i64 },
+    .{ .name = "input_target_id_len", .ty = .i64 },
+    .{ .name = "submit_target_name_len", .ty = .i64 },
+    .{ .name = "submit_target_id_len", .ty = .i64 },
+    .{ .name = "pointer_type_len", .ty = .i64 },
+    .{ .name = "selected_values_len", .ty = .i64 },
+    .{ .name = "clipboard_text_len", .ty = .i64 },
+    .{ .name = "drop_text_len", .ty = .i64 },
+    .{ .name = "before_input_data_len", .ty = .i64 },
+    .{ .name = "before_input_type_len", .ty = .i64 },
+    .{ .name = "related_target_name_len", .ty = .i64 },
+    .{ .name = "related_target_id_len", .ty = .i64 },
+    .{ .name = "key_value_len", .ty = .i64 },
+    .{ .name = "key_code_len", .ty = .i64 },
+};
 
 fn f64BitsLiteral(init_expr: []const u8, ty: parser.StateType) LowerError!i64 {
     const value_text = stateInitValueExpr(init_expr, ty);
@@ -5879,8 +5951,134 @@ pub const SaxLowerer = struct {
         }
     }
 
+    fn compileSlaHandlerBody(self: *SaxLowerer, handler: parser.Handler) ![]const u8 {
+        var fields = try self.allocator.alloc(sla_handler_bridge.HandlerStateField, self.component.state_vars.len);
+        defer self.allocator.free(fields);
+
+        var addresses = std.ArrayList([]const u8).init(self.allocator);
+        defer {
+            for (addresses.items) |address| self.allocator.free(address);
+            addresses.deinit();
+        }
+
+        for (self.component.state_vars, 0..) |sv, idx| {
+            const slot_name = try self.stateSlotConstName(sv.name);
+            defer self.allocator.free(slot_name);
+            const address = try std.fmt.allocPrint(self.allocator, "state+{s}", .{slot_name});
+            try addresses.append(address);
+            fields[idx] = .{
+                .name = sv.name,
+                .ty = toSlaHandlerStateType(sv.ty),
+                .address = address,
+            };
+        }
+
+        return try sla_handler_bridge.compileHandler(self.allocator, handler.name, handler.body, fields, .{ .ambient_bindings = react_sla_ambient_bindings[0..] });
+    }
+
+    fn bodyUsesIdentifier(body: []const u8, name: []const u8) bool {
+        var pos: usize = 0;
+        while (std.mem.indexOfPos(u8, body, pos, name)) |idx| {
+            const before_ok = idx == 0 or !(std.ascii.isAlphanumeric(body[idx - 1]) or body[idx - 1] == '_');
+            const after_idx = idx + name.len;
+            const after_ok = after_idx >= body.len or !(std.ascii.isAlphanumeric(body[after_idx]) or body[after_idx] == '_');
+            if (before_ok and after_ok) return true;
+            pos = after_idx;
+        }
+        return false;
+    }
+
+    fn emitSlaEventAmbientPrelude(self: *SaxLowerer, out: *std.ArrayList(u8), handler_name: []const u8, body: []const u8) !void {
+        _ = self;
+        const uses_current_value = bodyUsesIdentifier(body, "current_value") or bodyUsesIdentifier(body, "current_value_len");
+        const uses_target_value_i64 = bodyUsesIdentifier(body, "target_value_i64");
+
+        if (bodyUsesIdentifier(body, "checked")) {
+            try out.writer().writeAll("  checked = call @sax_event_target_checked()\n");
+        }
+        if (bodyUsesIdentifier(body, "current_checked")) {
+            try out.writer().writeAll("  current_checked = call @sax_event_current_target_checked()\n");
+        }
+        if (uses_current_value) {
+            try out.writer().writeAll("  current_value = stack_alloc 1024\n");
+            try out.writer().writeAll("  current_value_len = call @sax_event_target_value(*current_value, 1024)\n");
+        }
+        if (uses_target_value_i64) {
+            _ = handler_name;
+            try out.writer().writeAll("  target_value_i64 = call @sax_event_target_value_i64()\n");
+        }
+    }
+
+    fn usesSlaEventValueI64(self: *const SaxLowerer) bool {
+        for (self.component.handlers) |handler| {
+            if (handler.language != .sla) continue;
+            if (bodyUsesIdentifier(handler.body, "target_value_i64") or std.mem.indexOf(u8, handler.body, "sax_event_target_value_i64") != null) return true;
+        }
+        return false;
+    }
+
+    fn emitSlaEventValueI64Helper(self: *SaxLowerer, out: *std.ArrayList(u8)) !void {
+        _ = self;
+        try out.writer().writeAll(
+            \\@sax_event_target_value_i64() -> i64:
+            \\L_ENTRY:
+            \\  target_value_buf = stack_alloc 32
+            \\  target_value_len = call @sax_event_target_value(*target_value_buf, 32)
+            \\  target_value_has_3 = gt target_value_len, 2
+            \\  br target_value_has_3 -> L_SLA_TARGET_VALUE_I64_3, L_SLA_TARGET_VALUE_I64_CHECK_2
+            \\
+            \\L_SLA_TARGET_VALUE_I64_CHECK_2:
+            \\  target_value_has_2 = gt target_value_len, 1
+            \\  br target_value_has_2 -> L_SLA_TARGET_VALUE_I64_2, L_SLA_TARGET_VALUE_I64_CHECK_1
+            \\
+            \\L_SLA_TARGET_VALUE_I64_CHECK_1:
+            \\  target_value_has_1 = gt target_value_len, 0
+            \\  br target_value_has_1 -> L_SLA_TARGET_VALUE_I64_1, L_SLA_TARGET_VALUE_I64_0
+            \\
+            \\L_SLA_TARGET_VALUE_I64_0:
+            \\  return 0
+            \\
+            \\L_SLA_TARGET_VALUE_I64_1:
+            \\  target_value_b0 = load target_value_buf+0 as u8
+            \\  target_value_d0 = zext target_value_b0 as i64
+            \\  target_value_d0 = sub target_value_d0, 48
+            \\  return target_value_d0
+            \\
+            \\L_SLA_TARGET_VALUE_I64_2:
+            \\  target_value_b0_2 = load target_value_buf+0 as u8
+            \\  target_value_d0_2 = zext target_value_b0_2 as i64
+            \\  target_value_d0_2 = sub target_value_d0_2, 48
+            \\  target_value_b1 = load target_value_buf+1 as u8
+            \\  target_value_d1 = zext target_value_b1 as i64
+            \\  target_value_d1 = sub target_value_d1, 48
+            \\  target_value_result_2 = mul target_value_d0_2, 10
+            \\  target_value_result_2 = add target_value_result_2, target_value_d1
+            \\  return target_value_result_2
+            \\
+            \\L_SLA_TARGET_VALUE_I64_3:
+            \\  target_value_b0_3 = load target_value_buf+0 as u8
+            \\  target_value_d0_3 = zext target_value_b0_3 as i64
+            \\  target_value_d0_3 = sub target_value_d0_3, 48
+            \\  target_value_b1_3 = load target_value_buf+1 as u8
+            \\  target_value_d1_3 = zext target_value_b1_3 as i64
+            \\  target_value_d1_3 = sub target_value_d1_3, 48
+            \\  target_value_b2 = load target_value_buf+2 as u8
+            \\  target_value_d2 = zext target_value_b2 as i64
+            \\  target_value_d2 = sub target_value_d2, 48
+            \\  target_value_result_3 = mul target_value_d0_3, 100
+            \\  target_value_tens = mul target_value_d1_3, 10
+            \\  target_value_result_3 = add target_value_result_3, target_value_tens
+            \\  target_value_result_3 = add target_value_result_3, target_value_d2
+            \\  return target_value_result_3
+            \\
+            \\
+        );
+    }
+
     fn emitHandler(self: *SaxLowerer, out: *std.ArrayList(u8), handler: parser.Handler) !void {
-        const body = handler.body;
+        const compiled_body = if (handler.language == .sla) try self.compileSlaHandlerBody(handler) else null;
+        defer if (compiled_body) |body| self.allocator.free(body);
+        const body = compiled_body orelse handler.body;
         const export_name = try self.handlerExportName(handler.name);
         defer self.allocator.free(export_name);
         const impl_name = try self.handlerImplName(handler.name);
@@ -5892,6 +6090,7 @@ pub const SaxLowerer = struct {
         try out.writer().print("@export {s}(ctx: ptr):\nL_ENTRY:\n  call @{s}(ctx)\n  return\n\n", .{ export_name, impl_name });
         try out.writer().print("@ffi_wrapper {s}(ctx: ptr):\n", .{impl_name});
         try out.writer().print("L_ENTRY:\n  state = load ctx+{s} as ptr\n  dom = load ctx+{s} as ptr\n", .{ ctx_state_name, ctx_dom_name });
+        if (handler.language == .sla) try self.emitSlaEventAmbientPrelude(out, handler.name, body);
         try self.emitHandlerBody(out, body);
         try out.writer().writeByte('\n');
     }
@@ -5954,6 +6153,9 @@ pub const SaxLowerer = struct {
     }
 
     fn emitRefCallbackHandler(self: *SaxLowerer, out: *std.ArrayList(u8), handler: parser.Handler, kind: RefCallbackKind) !void {
+        const compiled_body = if (handler.language == .sla) try self.compileSlaHandlerBody(handler) else null;
+        defer if (compiled_body) |body| self.allocator.free(body);
+        const body = compiled_body orelse handler.body;
         const impl_name = try self.refCallbackImplName(handler.name, kind);
         defer self.allocator.free(impl_name);
         const ctx_state_name = try self.ctxStateOffsetConstName();
@@ -5967,7 +6169,7 @@ pub const SaxLowerer = struct {
 
         try out.writer().print("@ffi_wrapper {s}(ctx: ptr, ref_value: {s}):\n", .{ impl_name, ref_ty });
         try out.writer().print("L_ENTRY:\n  state = load ctx+{s} as ptr\n  dom = load ctx+{s} as ptr\n", .{ ctx_state_name, ctx_dom_name });
-        try self.emitHandlerBody(out, handler.body);
+        try self.emitHandlerBody(out, body);
         try out.writer().writeByte('\n');
     }
 
@@ -6613,6 +6815,7 @@ pub const SaxLowerer = struct {
         for (self.component.lifecycle_hooks) |hook| {
             try self.emitLifecycleHook(out, hook);
         }
+        if (self.usesSlaEventValueI64()) try self.emitSlaEventValueI64Helper(out);
         for (self.component.handlers) |handler| {
             if (self.shouldEmitPlainHandler(handler)) try self.emitHandler(out, handler);
         }

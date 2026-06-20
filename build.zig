@@ -24,7 +24,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const sla_handler_bridge = b.createModule(.{
+        .root_source_file = b.path("../sa_plugin_sla/src/handler_bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     root_module.addImport("plugin_api", plugin_api);
+    root_module.addImport("sla_handler_bridge", sla_handler_bridge);
     root_module.addOptions("build_options", build_options);
     addLlvmcShimToModule(b, root_module);
     linkLLVMToModule(root_module, llvm_include_dir, llvm_lib_dir, llvm_lib_name);
@@ -64,6 +70,20 @@ pub fn build(b: *std.Build) void {
     addDemoSuite(b, test_step, sa_bin, installed_lib, plugin_lib_input, wasm_verify, .{
         .source = "demos/react_counter.sax",
         .out_name = "react-counter",
+        .runtime_case = "counter",
+        .exports = &.{
+            "sax_counter_init",
+            "sax_counter_render",
+            "sax_counter_destroy",
+            "sax_counter_inc",
+            "sax_counter_dec",
+            "sax_counter_reset",
+        },
+    });
+
+    addDemoSuite(b, test_step, sa_bin, installed_lib, plugin_lib_input, wasm_verify, .{
+        .source = "demos/react_counter_sla.sax",
+        .out_name = "react-counter-sla",
         .runtime_case = "counter",
         .exports = &.{
             "sax_counter_init",

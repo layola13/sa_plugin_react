@@ -17,6 +17,16 @@ For an input such as `demos/react_counter.sax`, the build command generates:
 SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react build demos/react_counter.sax --out-dir /tmp/react-counter
 ```
 
+React/SAX also supports opt-in Sla handlers using `fn name() { ... }` while preserving existing SA label handlers. The focused Sla demo is `demos/react_counter_sla.sax`:
+
+```bash
+zig build test
+SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react check demos/react_counter_sla.sax
+SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so /home/vscode/projects/sci/zig-out/bin/sa react build demos/react_counter_sla.sax --out-dir zig-out/react-counter-sla-browser
+```
+
+Sla event handlers can read state fields directly, call `render()`, call `sax_get_time()`, and use injected React event values such as `checked`, `current_checked`, `current_value`, `current_value_len`, and `sax_event_target_value_i64()` for focused UI handlers.
+
 Additional component source files can be composed into the same SAX program with `--include` or `-I`:
 
 ```bash
@@ -36,6 +46,7 @@ SA_PLUGINS_PATH=$PWD/zig-out/lib/libreact.so:/home/vscode/projects/sa_plugins/sa
 - React DOM style attribute aliases such as `className`, `htmlFor`, `readOnly`, `autoComplete`, `tabIndex`, `rowSpan`, `colSpan`, `charSet`, `httpEquiv`, `dateTime`, `hrefLang`, `inputMode`, `enterKeyHint`, `autoCapitalize`, and `autoCorrect`
 - React style event aliases including clipboard, composition, beforeinput, mouse, keyboard, pointer, scroll, form, disclosure/dialog, media, animation, transition, and `*Capture` capture-phase variants
 - React-style event handler references such as `onClick={increment}`, while retaining SAX-compatible `onClick={^increment}`
+- Opt-in Sla event handlers using `fn handler() { ... }`, with existing `@handler: L_ENTRY: ...` SA handlers still supported unchanged
 - React-style `onChange` mapping for text inputs and textareas, binding DOM `input` while preserving native `change` for selects and checkbox/radio/file inputs
 - Synthetic event bridge for handlers: target/currentTarget/relatedTarget reads, target/currentTarget/relatedTarget value/checked/name/id where applicable, keyboard key/code/repeat, pointer id/type/isPrimary, wheel delta/mode, touch count and first-touch identifier/client coordinates, clipboard text, drag/drop dataTransfer text, event type/timeStamp, beforeinput data/inputType, defaultPrevented, mouse button/client/page/screen coordinates, modifier keys, preventDefault, and stopPropagation
 - Broad lowercase HTML intrinsic coverage plus SVG namespace creation, while rejecting dangerous tags and attributes
