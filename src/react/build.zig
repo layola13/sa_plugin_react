@@ -1261,6 +1261,8 @@ test "sax wasm export collector mirrors generated SA exports" {
 }
 
 test "sax test llvm emitter writes real bitcode" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 

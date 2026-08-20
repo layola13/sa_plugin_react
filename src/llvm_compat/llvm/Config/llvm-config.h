@@ -1,0 +1,7 @@
+#ifndef LLVM_CONFIG_H
+#define LLVM_CONFIG_H
+#define LLVM_VERSION_MAJOR 14
+#define LLVM_VERSION_MINOR 0
+#define LLVM_VERSION_PATCH 6
+#define LLVM_VERSION_STRING "14.0.6"
+#endif

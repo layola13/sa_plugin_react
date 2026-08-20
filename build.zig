@@ -5,9 +5,9 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const sa_repo_root = b.option([]const u8, "sa-repo-root", "SA repository root used to resolve sa_std imports.") orelse "/home/vscode/projects/sci";
     const sa_bin = b.option([]const u8, "sa-bin", "Path to the SA host binary used for React integration tests.") orelse b.pathJoin(&.{ sa_repo_root, "zig-out/bin/sa" });
-    const llvm_include_dir = b.option([]const u8, "llvm-include-dir", "LLVM C API include directory.") orelse "/usr/lib/llvm-14/include";
-    const llvm_lib_dir = b.option([]const u8, "llvm-lib-dir", "LLVM library directory.") orelse "/usr/lib/llvm-14/lib";
-    const llvm_lib_name = b.option([]const u8, "llvm-lib-name", "LLVM system library name.") orelse "LLVM-14";
+    const llvm_include_dir = b.option([]const u8, "llvm-include-dir", "LLVM C API include directory.") orelse if (target.result.os.tag == .windows) "C:/LLVM-14/include" else "/usr/lib/llvm-14/include";
+    const llvm_lib_dir = b.option([]const u8, "llvm-lib-dir", "LLVM library directory.") orelse if (target.result.os.tag == .windows) "C:/LLVM-14/lib" else "/usr/lib/llvm-14/lib";
+    const llvm_lib_name = b.option([]const u8, "llvm-lib-name", "LLVM system library name.") orelse if (target.result.os.tag == .windows) "LLVM-C" else "LLVM-14";
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "repo_root", sa_repo_root);
@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
     root_module.addImport("plugin_api", plugin_api);
     root_module.addImport("sla_handler_bridge", sla_handler_bridge);
     root_module.addOptions("build_options", build_options);
-    addLlvmcShimToModule(b, root_module);
+    addLlvmcShimToModule(b, root_module, target);
     linkLLVMToModule(root_module, llvm_include_dir, llvm_lib_dir, llvm_lib_name);
 
     const lib = b.addLibrary(.{
@@ -201,6 +201,7 @@ const DemoSuite = struct {
 };
 
 fn addSaContractTest(b: *std.Build, test_step: *std.Build.Step, sa_bin: []const u8, test_path: []const u8) void {
+    if (b.graph.host.result.os.tag == .windows) return;
     const cmd = b.addSystemCommand(&.{ sa_bin, "test", test_path });
     cmd.addFileInput(b.path(test_path));
     test_step.dependOn(&cmd.step);
@@ -215,6 +216,7 @@ fn addDemoSuite(
     wasm_verify: *std.Build.Step.Compile,
     demo: DemoSuite,
 ) void {
+    if (b.graph.host.result.os.tag == .windows) return;
     const demo_input = b.path(demo.source);
 
     const check = b.addSystemCommand(&.{ sa_bin, "react", "check", demo.source });
@@ -244,8 +246,9 @@ fn addDemoSuite(
     test_step.dependOn(&run_runtime_verify.step);
 }
 
-fn addLlvmcShimToModule(b: *std.Build, module: *std.Build.Module) void {
+fn addLlvmcShimToModule(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     module.addCSourceFile(.{ .file = b.path("src/emit_llvm_llvmc_shim.c"), .flags = &.{} });
+    if (target.result.os.tag == .windows) module.addSystemIncludePath(.{ .cwd_relative = "src/llvm_compat" });
 }
 
 fn linkLLVMToModule(module: *std.Build.Module, include_dir: []const u8, lib_dir: []const u8, lib_name: []const u8) void {

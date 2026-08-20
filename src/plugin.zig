@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const plugin_api = @import("plugin_api");
 const parser = @import("react/parser.zig");
 const lowerer = @import("react/lowerer.zig");
@@ -8,6 +9,24 @@ const sax_build = @import("react/build.zig");
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+fn setEnvVarForTest(name: []const u8, value: ?[]const u8) !void {
+    if (comptime builtin.os.tag == .windows) {
+        const name_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
+        defer std.testing.allocator.free(name_w);
+        var value_w: ?[:0]u16 = null;
+        if (value) |text| value_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, text);
+        defer if (value_w) |text| std.testing.allocator.free(text);
+        if (std.os.windows.kernel32.SetEnvironmentVariableW(name_w.ptr, if (value_w) |text| text.ptr else null) == 0) return error.SetEnvironmentVariableFailed;
+    } else {
+        const name_z = try std.testing.allocator.dupeZ(u8, name);
+        defer std.testing.allocator.free(name_z);
+        if (value) |text| {
+            const value_z = try std.testing.allocator.dupeZ(u8, text);
+            defer std.testing.allocator.free(value_z);
+            if (setenv(name_z.ptr, value_z.ptr, 1) != 0) return error.SetEnvironmentVariableFailed;
+        } else if (unsetenv(name_z.ptr) != 0) return error.SetEnvironmentVariableFailed;
+    }
+}
 
 const skills = [_]plugin_api.SkillSection{
     .{
@@ -1707,8 +1726,8 @@ test "react plugin resolves includes from loaded plugin share dirs" {
     try writeAllFile("app.sax", app_source);
     try writeAllFile("fake/zig-out/share/mui/material.sax", library_source);
 
-    try std.testing.expectEqual(@as(c_int, 0), setenv("SA_PLUGINS_PATH", "fake/zig-out/lib/libmui.so", 1));
-    defer _ = unsetenv("SA_PLUGINS_PATH");
+    try setEnvVarForTest("SA_PLUGINS_PATH", "fake/zig-out/lib/libmui.so");
+    defer setEnvVarForTest("SA_PLUGINS_PATH", null) catch {};
 
     var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();

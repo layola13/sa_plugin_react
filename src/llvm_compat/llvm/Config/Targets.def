@@ -1,0 +1,6 @@
+#ifndef LLVM_NATIVE_TARGETINFO
+#define LLVM_NATIVE_TARGETINFO LLVMInitializeX86TargetInfo
+#define LLVM_NATIVE_TARGET LLVMInitializeX86Target
+#define LLVM_NATIVE_TARGETMC LLVMInitializeX86TargetMC
+#endif
+LLVM_TARGET(X86)
