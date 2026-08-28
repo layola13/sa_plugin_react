@@ -404,6 +404,38 @@ fn dupeWasmExports(allocator: std.mem.Allocator, source_text: []const u8) ![]con
     return try exports.toOwnedSlice();
 }
 
+/// Component-internal symbols are only ever called from within the wasm module
+/// itself (the lowerer wires parent->child calls at compile time), so they do
+/// not need to appear in the dynamic export table. Only the JS airlock-facing
+/// surface does: `sax_app_init`, plus every event-handler function it invokes
+/// dynamically via `exports[handler]`. Skipping the internal families keeps the
+/// linker command line under the Windows 32767-char spawn limit for large apps
+/// (hundreds of components otherwise emit thousands of --export flags).
+fn isWasmInternalExportName(name: []const u8) bool {
+    // State setters: sax_<comp>_set_<state>
+    if (std.mem.indexOf(u8, name, "_set_") != null) return true;
+
+    // Component lifecycle: sax_<comp>_<init|mount|slot|root|render|destroy>[...]
+    const lifecycle_suffixes = [_][]const u8{
+        "_mount_ffi",   "_render_ffi",  "_destroy_ffi",
+        "_root_ffi",    "_slot_ffi",    "_init_ffi",
+        "_mount",       "_render",      "_destroy",
+        "_root",        "_slot",
+    };
+    for (lifecycle_suffixes) |suffix| {
+        if (!std.mem.endsWith(u8, name, suffix)) continue;
+        const stem = name[0 .. name.len - suffix.len];
+        // Keep short/stdlib names (sax_app_init etc.): require a component
+        // prefix "sax_<something>" with an inner underscore.
+        if (std.mem.startsWith(u8, stem, "sax_") and
+            std.mem.indexOfScalarPos(u8, stem, 4, '_') != null)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn dupeWasmExportsFromSourceUnits(allocator: std.mem.Allocator, units: []const SourceUnit) ![]const []const u8 {
     var exports = std.ArrayList([]const u8).init(allocator);
     errdefer {
@@ -416,6 +448,8 @@ fn dupeWasmExportsFromSourceUnits(allocator: std.mem.Allocator, units: []const S
         defer freeWasmExports(allocator, unit_exports);
 
         for (unit_exports) |name| {
+            if (isWasmInternalExportName(name)) continue;
+
             var found = false;
             for (exports.items) |existing| {
                 if (std.mem.eql(u8, existing, name)) {
@@ -836,7 +870,12 @@ fn computeSourceUnitObjectKey(
     hasher.update(unit.source_text);
     var out: [32]u8 = undefined;
     hasher.final(&out);
-    return try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&out)});
+    // Windows CreateProcessW caps the command line at 32k chars; long hex
+    // cache file names push linker argv over that limit once every source
+    // unit is linked. Keep the key short but collision-resistant.
+    var short: [16]u8 = undefined;
+    _ = std.fmt.bufPrint(&short, "{s}", .{std.fmt.fmtSliceHexLower(out[0..8])}) catch unreachable;
+    return try allocator.dupe(u8, &short);
 }
 
 pub fn buildBrowserWasmFromSourceUnits(
@@ -909,7 +948,7 @@ pub fn buildBrowserWasmFromSourceUnits(
     var stable_hash_hex: [64]u8 = undefined;
     _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&stable_hash)}) catch unreachable;
 
-    const unit_cache_dir = try std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-browser-wasm-source-units", &stable_hash_hex });
+    const unit_cache_dir = try std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-units", &stable_hash_hex });
     defer allocator.free(unit_cache_dir);
 
     var bitcode_paths = std.ArrayList([]const u8).init(allocator);
