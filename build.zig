@@ -1,5 +1,11 @@
 const std = @import("std");
 
+/// NOTE(Zig 0.17): `Build.pathFromRoot` / `getInstallPath` were removed.
+fn pathFromRoot(b: *std.Build, sub_path: []const u8) []u8 {
+    const root_path = b.root.root_dir.path orelse ".";
+    return std.fs.path.resolve(b.allocator, &.{ root_path, sub_path }) catch @panic("OOM");
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -54,7 +60,7 @@ pub fn build(b: *std.Build) void {
     addSaContractTest(b, test_step, sa_bin, "tests/react_event_binding_contract.sa");
     addSaContractTest(b, test_step, sa_bin, "tests/react_typed_state_contract.sa");
 
-    const installed_lib = b.getInstallPath(.lib, "libreact.so");
+    const installed_lib = pathFromRoot(b, "zig-out/lib/libreact.so");
     const plugin_lib_input = lib.getEmittedBin();
 
     const wasm_verify_module = b.createModule(.{
