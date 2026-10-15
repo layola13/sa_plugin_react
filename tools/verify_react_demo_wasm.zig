@@ -100,22 +100,28 @@ const optional_imports = [_]Symbol{
 };
 
 const Found = struct {
-    imports: [required_imports.len]bool = [_]bool{false} ** required_imports.len,
-    optional_imports: [optional_imports.len]bool = [_]bool{false} ** optional_imports.len,
+    imports: [required_imports.len]bool = std.mem.zeroes([required_imports.len]bool),
+    optional_imports: [optional_imports.len]bool = std.mem.zeroes([optional_imports.len]bool),
     memory_export: bool = false,
     app_init_export: bool = false,
     function_exports: []bool,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var arg_list = std.array_list.Managed([]const u8).init(allocator);
+    defer arg_list.deinit();
+    var arg_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer arg_it.deinit();
+    while (arg_it.next()) |a| try arg_list.append(a);
+    const args = arg_list.items;
+    var ebuf: [8192]u8 = undefined;
+    var ew = std.Io.File.stderr().writerStreaming(io, &ebuf);
+    defer ew.interface.flush() catch {};
     if (args.len < 3) {
-        try std.io.getStdErr().writer().print("usage: {s} <sax-demo-output-dir> <expected-function-export>...\n", .{args[0]});
+        try ew.interface.print("usage: {s} <sax-demo-output-dir> <expected-function-export>...\n", .{args[0]});
         return error.InvalidArguments;
     }
     const expected_function_exports = args[2..];
@@ -127,10 +133,10 @@ pub fn main() !void {
     const app_sa_path = try std.fs.path.join(allocator, &.{ args[1], "app.sa" });
     defer allocator.free(app_sa_path);
 
-    const wasm = try std.fs.cwd().readFileAlloc(allocator, wasm_path, 16 * 1024 * 1024);
+    const wasm = try std.Io.Dir.cwd().readFileAlloc(io, wasm_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(wasm);
     if (wasm.len < 1024) {
-        try std.io.getStdErr().writer().print("SAX demo wasm is unexpectedly small: {d} bytes\n", .{wasm.len});
+        try ew.interface.print("SAX demo wasm is unexpectedly small: {d} bytes\n", .{wasm.len});
         return error.InvalidDemoWasm;
     }
 
@@ -140,202 +146,202 @@ pub fn main() !void {
     defer allocator.free(found.function_exports);
     @memset(found.function_exports, false);
     try scanWasm(wasm, expected_function_exports, &found);
-    try reportMissing(&found, expected_function_exports);
+    try reportMissing(&ew.interface, &found, expected_function_exports);
 
-    const airlock = try std.fs.cwd().readFileAlloc(allocator, airlock_path, 16 * 1024 * 1024);
+    const airlock = try std.Io.Dir.cwd().readFileAlloc(io, airlock_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(airlock);
     if (!std.mem.containsAtLeast(u8, airlock, 1, "malloc(size)") or
         !std.mem.containsAtLeast(u8, airlock, 1, "return _malloc(size);") or
         !std.mem.containsAtLeast(u8, airlock, 1, "free(_ptr)") or
         std.mem.containsAtLeast(u8, airlock, 1, "return BigInt(_malloc(size));"))
     {
-        try std.io.getStdErr().writer().writeAll("airlock.js does not expose the expected wasm32 malloc/free imports\n");
+        try ew.interface.writeAll("airlock.js does not expose the expected wasm32 malloc/free imports\n");
         return error.InvalidAirlock;
     }
 
-    const app_sa = try std.fs.cwd().readFileAlloc(allocator, app_sa_path, 16 * 1024 * 1024);
+    const app_sa = try std.Io.Dir.cwd().readFileAlloc(io, app_sa_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(app_sa);
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_attr(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_attr")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_attr:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_attr:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_ftoa_bits(")) {
         if (!hasOptionalImport(&found, "sax_ftoa_bits")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_ftoa_bits:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_ftoa_bits:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_ftoa_bits(value_bits, decimals, buf_ptr, buf_len)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_ftoa_bits for f64 state formatting\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_ftoa_bits for f64 state formatting\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_json_write_string(")) {
         if (!hasOptionalImport(&found, "sax_json_write_string")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_json_write_string:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_json_write_string:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_json_write_string(src_ptr, src_len, dst_ptr, dst_len)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_json_write_string for JSON object props\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_json_write_string for JSON object props\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_json_write_object_members(")) {
         if (!hasOptionalImport(&found, "sax_json_write_object_members")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_json_write_object_members:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_json_write_object_members:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_json_write_object_members(src_ptr, src_len, dst_ptr, dst_len, prefix_comma)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_json_write_object_members for JSON object prop spreads\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_json_write_object_members for JSON object prop spreads\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_json_normalize_object(")) {
         if (!hasOptionalImport(&found, "sax_json_normalize_object")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_json_normalize_object:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_json_normalize_object:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_json_normalize_object(src_ptr, src_len, dst_ptr, dst_len)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_json_normalize_object for object prop overwrite normalization\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_json_normalize_object for object prop overwrite normalization\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_target(")) {
         if (!hasOptionalImport(&found, "sax_event_target")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_target:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_target:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_target_value(")) {
         if (!hasOptionalImport(&found, "sax_event_target_value")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_target_value:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_target_value:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_event_target_value(buf_ptr, buf_len)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_event_target_value for synthetic event reads\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_event_target_value for synthetic event reads\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_target_checked(")) {
         if (!hasOptionalImport(&found, "sax_event_target_checked")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_target_checked:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_target_checked:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_key(")) {
         if (!hasOptionalImport(&found, "sax_event_key")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_key:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_key:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_type(")) {
         if (!hasOptionalImport(&found, "sax_event_type")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_type:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_type:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_current_target(")) {
         if (!hasOptionalImport(&found, "sax_event_current_target")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_current_target:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_current_target:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_selected(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_selected")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_selected:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_selected:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_selected(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_selected")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_selected:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_selected:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_focus(")) {
         if (!hasOptionalImport(&found, "sax_dom_focus")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_focus:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_focus:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_multiple(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_multiple")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_multiple:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_multiple:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_multiple(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_multiple")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_multiple:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_multiple:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_disabled(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_disabled")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_disabled:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_disabled:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_disabled(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_disabled")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_disabled:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_disabled:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_readonly(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_readonly")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_readonly:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_readonly:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_readonly(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_readonly")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_readonly:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_readonly:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_required(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_required")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_required:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_required:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_dom_set_required(node_h, required)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_dom_set_required for React required props\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_dom_set_required for React required props\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_required(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_required")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_required:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_required:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_open(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_open")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_open:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_open:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_dom_set_open(node_h, open)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_dom_set_open for React open props\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_dom_set_open for React open props\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_open(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_open")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_open:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_open:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_prevent_default(")) {
         if (!hasOptionalImport(&found, "sax_event_prevent_default")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_prevent_default:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_prevent_default:function\n");
             return error.MissingWasmSymbol;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_event_stop_propagation(")) {
         if (!hasOptionalImport(&found, "sax_event_stop_propagation")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_event_stop_propagation:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_event_stop_propagation:function\n");
             return error.MissingWasmSymbol;
         }
     }
@@ -387,51 +393,51 @@ pub fn main() !void {
     for (event_field_checks) |check| {
         if (!std.mem.containsAtLeast(u8, app_sa, 1, check.call)) continue;
         if (!hasOptionalImport(&found, check.import_name)) {
-            try std.io.getStdErr().writer().print("missing wasm import env.{s}:function\n", .{check.import_name});
+            try ew.interface.print("missing wasm import env.{s}:function\n", .{check.import_name});
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, check.airlock_name)) {
-            try std.io.getStdErr().writer().print("airlock.js does not expose {s} for synthetic event fields\n", .{check.import_name});
+            try ew.interface.print("airlock.js does not expose {s} for synthetic event fields\n", .{check.import_name});
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_bool_prop(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_bool_prop")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_bool_prop:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_bool_prop:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_dom_set_bool_prop(node_h, prop_ptr, prop_len, value)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_dom_set_bool_prop for React boolean props\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_dom_set_bool_prop for React boolean props\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_bool_prop(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_bool_prop")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_bool_prop:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_bool_prop:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_dom_get_bool_prop(node_h, prop_ptr, prop_len)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_dom_get_bool_prop for React boolean props\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_dom_get_bool_prop for React boolean props\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_set_str_prop(")) {
         if (!hasOptionalImport(&found, "sax_dom_set_str_prop")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_set_str_prop:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_set_str_prop:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_dom_set_str_prop(node_h, prop_ptr, prop_len, val_ptr, val_len)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_dom_set_str_prop for React string props\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_dom_set_str_prop for React string props\n");
             return error.InvalidAirlock;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_get_str_prop(")) {
         if (!hasOptionalImport(&found, "sax_dom_get_str_prop")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_get_str_prop:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_get_str_prop:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_dom_get_str_prop(node_h, prop_ptr, prop_len, buf_ptr, buf_len)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_dom_get_str_prop for React string props\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_dom_get_str_prop for React string props\n");
             return error.InvalidAirlock;
         }
     }
@@ -454,17 +460,17 @@ pub fn main() !void {
         };
         for (forbidden_event_attrs) |needle| {
             if (!std.mem.containsAtLeast(u8, app_sa, 1, needle)) continue;
-            try std.io.getStdErr().writer().writeAll("app.sa binds browser events with SAX attribute names instead of DOM event names\n");
+            try ew.interface.writeAll("app.sa binds browser events with SAX attribute names instead of DOM event names\n");
             return error.InvalidDemoEventBinding;
         }
     }
     if (std.mem.containsAtLeast(u8, app_sa, 1, "call @sax_dom_bind_event_capture(")) {
         if (!hasOptionalImport(&found, "sax_dom_bind_event_capture")) {
-            try std.io.getStdErr().writer().writeAll("missing wasm import env.sax_dom_bind_event_capture:function\n");
+            try ew.interface.writeAll("missing wasm import env.sax_dom_bind_event_capture:function\n");
             return error.MissingWasmSymbol;
         }
         if (!std.mem.containsAtLeast(u8, airlock, 1, "sax_dom_bind_event_capture(node_h, evt_ptr, evt_len, handler_ptr, handler_len, ctx)")) {
-            try std.io.getStdErr().writer().writeAll("airlock.js does not expose sax_dom_bind_event_capture for React capture events\n");
+            try ew.interface.writeAll("airlock.js does not expose sax_dom_bind_event_capture for React capture events\n");
             return error.InvalidAirlock;
         }
     }
@@ -544,9 +550,8 @@ fn scanExportSection(section: []const u8, expected_function_exports: []const []c
     if (index != section.len) return error.InvalidExportSection;
 }
 
-fn reportMissing(found: *const Found, expected_function_exports: []const []const u8) !void {
+fn reportMissing(stderr: *std.Io.Writer, found: *const Found, expected_function_exports: []const []const u8) !void {
     var ok = true;
-    const stderr = std.io.getStdErr().writer();
     for (required_imports, 0..) |symbol, index| {
         if (!found.imports[index]) {
             ok = false;

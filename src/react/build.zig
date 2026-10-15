@@ -13,7 +13,7 @@ fn writeTestWasm(path: []const u8) !void {
 fn runLlvmAs(allocator: std.mem.Allocator, ll_path: []const u8, artifact_path: []const u8) !void {
     const tools = [_][]const u8{ "llvm-as-14", "llvm-as" };
     for (tools) |tool| {
-        const result = std.process.Child.run(.{
+        const result = sio.Child.run(.{
             .allocator = allocator,
             .argv = &.{ tool, ll_path, "-o", artifact_path },
         }) catch |err| switch (err) {
@@ -24,7 +24,7 @@ fn runLlvmAs(allocator: std.mem.Allocator, ll_path: []const u8, artifact_path: [
         defer allocator.free(result.stderr);
 
         switch (result.term) {
-            .Exited => |code| if (code == 0) return,
+            .exited => |code| if (code == 0) return,
             else => {},
         }
         return error.ChildProcessFailed;
@@ -1267,7 +1267,7 @@ test "sax test llvm emitter writes real bitcode" {
 
     var old_cwd = try sio.cwd().openDir(".", .{});
     defer old_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer old_cwd.setAsCwd() catch {};
 
     try emit_llvm_llvmc.emitLlvmcToFile(
@@ -1288,7 +1288,7 @@ test "sax test llvm emitter writes real bitcode" {
 
     const tools = [_][]const u8{ "llvm-dis-14", "llvm-dis" };
     for (tools) |tool| {
-        const result = std.process.Child.run(.{
+        const result = sio.Child.run(.{
             .allocator = std.testing.allocator,
             .argv = &.{ tool, "app.wasm.sa.bc", "-o", "-" },
         }) catch |err| switch (err) {
@@ -1299,7 +1299,7 @@ test "sax test llvm emitter writes real bitcode" {
         defer std.testing.allocator.free(result.stderr);
 
         switch (result.term) {
-            .Exited => |code| {
+            .exited => |code| {
                 try std.testing.expectEqual(@as(u8, 0), code);
                 try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "define void @__sax_test()"));
                 return;

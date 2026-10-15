@@ -1447,9 +1447,13 @@ fn runSaxCommandAbi(ctx: *const plugin_api.Context, argv: [*]const [*:0]const u8
     const result = runSaxCommandImpl(&local_ctx, args, stdout_writer, stderr_writer) catch |err| {
         if (!isReactCliError(err)) return @intFromEnum(plugin_api.AbiStatus.failed);
         writeSaxCliError(stderr_writer, args, err) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+        stdout_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
+        stderr_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
         out_code.* = reactCliExitCode(err);
         return @intFromEnum(plugin_api.AbiStatus.ok);
     };
+    stdout_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    stderr_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
     if (result) |code| {
         out_code.* = code;
         return @intFromEnum(plugin_api.AbiStatus.ok);
@@ -1496,7 +1500,7 @@ fn dupeZArgs(allocator: std.mem.Allocator, argv: []const []const u8) ![][*:0]con
         for (out[0..copied]) |arg| allocator.free(std.mem.sliceTo(arg, 0));
     }
     for (argv, 0..) |arg, idx| {
-        out[idx] = try allocator.dupeZ(u8, arg);
+        out[idx] = try allocator.dupeSentinel(u8, arg, 0);
         copied += 1;
     }
     return out;
@@ -1545,7 +1549,7 @@ fn expectSaxCheckFailure(source: []const u8, file_name: []const u8, expected_err
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     try writeAllFile(file_name, source);
@@ -1603,7 +1607,7 @@ test "react plugin check parses and lowers a real component" {
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     try writeAllFile("counter.sax", valid_counter_sax);
@@ -1624,7 +1628,7 @@ test "react plugin build emits frontend artifacts from real sax source" {
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     try writeAllFile("counter.sax", valid_counter_sax);
@@ -1665,7 +1669,7 @@ test "react plugin composes included sax component sources" {
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     const app_source =
@@ -1713,7 +1717,7 @@ test "react plugin resolves includes from loaded plugin share dirs" {
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     const app_source =
@@ -1754,14 +1758,14 @@ test "react plugin resolves includes relative to cwd before plugin installs" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("demos");
-    try tmp.dir.makePath("mui");
-    try tmp.dir.writeFile(.{ .sub_path = "demos/app.sax", .data = "<Component name=\"App\"><div /></Component>" });
-    try tmp.dir.writeFile(.{ .sub_path = "mui/material.sax", .data = "<Component name=\"LocalMui\"><div /></Component>" });
+    try tmp.dir.createDirPath(sio.io(), "demos");
+    try tmp.dir.createDirPath(sio.io(), "mui");
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "demos/app.sax", .data = "<Component name=\"App\"><div /></Component>" });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "mui/material.sax", .data = "<Component name=\"LocalMui\"><div /></Component>" });
 
     var old_cwd = try sio.cwd().openDir(".", .{});
     defer old_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer old_cwd.setAsCwd() catch {};
 
     const path = try resolveIncludePath(std.testing.allocator, "demos/app.sax", "mui/material.sax");
@@ -1831,11 +1835,11 @@ test "react plugin check accepts negated logical object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "negated_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "negated_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -1869,11 +1873,11 @@ test "react plugin check accepts logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "logical_or_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -1907,11 +1911,11 @@ test "react plugin check accepts negated logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "negated_logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "negated_logical_or_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -1946,11 +1950,11 @@ test "react plugin check accepts nested dynamic object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nested_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "nested_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -1988,11 +1992,11 @@ test "react plugin check accepts nested ptr ternary object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nested_ptr_ternary_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "nested_ptr_ternary_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2028,11 +2032,11 @@ test "react plugin check accepts nested logical or ptr object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nested_logical_or_ptr_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "nested_logical_or_ptr_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2067,11 +2071,11 @@ test "react plugin check accepts array item dynamic object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2106,11 +2110,11 @@ test "react plugin check accepts leading array item dynamic object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2144,11 +2148,11 @@ test "react plugin check accepts leading array item conditional object spreads" 
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_conditional_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_conditional_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2182,11 +2186,11 @@ test "react plugin check accepts leading array item ternary null branch object s
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_ternary_null_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_ternary_null_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2220,11 +2224,11 @@ test "react plugin check accepts leading array item logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_logical_or_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2258,11 +2262,11 @@ test "react plugin check accepts array item conditional object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_conditional_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_conditional_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2296,11 +2300,11 @@ test "react plugin check accepts array item ternary null branch object spreads" 
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_ternary_null_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_ternary_null_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2334,11 +2338,11 @@ test "react plugin check accepts array item logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_logical_or_spread.sax", .data = valid_source });
 
     var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
@@ -2423,7 +2427,7 @@ test "react plugin new creates a usable project scaffold" {
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
