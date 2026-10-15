@@ -1,4 +1,5 @@
 const std = @import("std");
+const sio = @import("sio");
 const parser = @import("react/parser.zig");
 const lowerer = @import("react/lowerer.zig");
 const reachability = @import("react/reachability.zig");
@@ -7,11 +8,11 @@ const sax_build = @import("react/build.zig");
 
 pub const ReactArtifacts = struct {
     root_name: []u8,
-    sa_code: std.ArrayList(u8),
-    shared_sa_code: std.ArrayList(u8),
-    component_sa_codes: std.ArrayList(std.ArrayList(u8)),
-    airlock_js: std.ArrayList(u8),
-    index_html: std.ArrayList(u8),
+    sa_code: std.array_list.Managed(u8),
+    shared_sa_code: std.array_list.Managed(u8),
+    component_sa_codes: std.array_list.Managed(std.array_list.Managed(u8)),
+    airlock_js: std.array_list.Managed(u8),
+    index_html: std.array_list.Managed(u8),
 
     pub fn deinit(self: *ReactArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.root_name);
@@ -27,13 +28,13 @@ pub const ReactArtifacts = struct {
 
 pub const SourceUnit = sax_build.SourceUnit;
 
-fn appendComponentSansExternBlock(out: *std.ArrayList(u8), text: []const u8) !void {
+fn appendComponentSansExternBlock(out: *std.array_list.Managed(u8), text: []const u8) !void {
     var cursor: usize = 0;
     var in_extern_block = false;
     while (cursor < text.len) {
         const line_end = std.mem.indexOfScalarPos(u8, text, cursor, '\n') orelse text.len;
         const next_cursor = if (line_end < text.len) line_end + 1 else text.len;
-        const line = std.mem.trimRight(u8, text[cursor..line_end], "\r");
+        const line = std.mem.trimEnd(u8, text[cursor..line_end], "\r");
 
         if (!in_extern_block) {
             if (std.mem.startsWith(u8, line, "@extern ")) {
@@ -67,20 +68,20 @@ fn lowercaseName(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 fn fileExists(path: []const u8) bool {
-    var file = std.fs.cwd().openFile(path, .{}) catch return false;
+    var file = sio.cwd().openFile(path, .{}) catch return false;
     file.close();
     return true;
 }
 
 fn readSource(allocator: std.mem.Allocator, sax_file: []const u8, stderr: anytype) ![]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, sax_file, 16 * 1024 * 1024) catch |err| {
+    return sio.cwd().readFileAlloc(allocator, sax_file, 16 * 1024 * 1024) catch |err| {
         try stderr.print("error[SA-REACT-IO]: failed to read {s}: {s}\n", .{ sax_file, @errorName(err) });
         return error.ReadFailed;
     };
 }
 
 fn firstPathSegment(path: []const u8) []const u8 {
-    const normalized = std.mem.trimLeft(u8, path, "/\\");
+    const normalized = std.mem.trimStart(u8, path, "/\\");
     const slash = std.mem.indexOfAny(u8, normalized, "/\\") orelse normalized.len;
     return normalized[0..slash];
 }
@@ -94,7 +95,7 @@ fn candidateIncludePath(allocator: std.mem.Allocator, base_dir: []const u8, incl
 }
 
 fn findIncludeInPathList(allocator: std.mem.Allocator, env_name: []const u8, include_file: []const u8) !?[]u8 {
-    const value = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+    const value = sio.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         else => return err,
     };
@@ -109,7 +110,7 @@ fn findIncludeInPathList(allocator: std.mem.Allocator, env_name: []const u8, inc
 }
 
 fn findIncludeNearLoadedPlugins(allocator: std.mem.Allocator, include_file: []const u8) !?[]u8 {
-    const value = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
+    const value = sio.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         else => return err,
     };
@@ -137,9 +138,9 @@ fn findInstalledPluginInclude(allocator: std.mem.Allocator, include_file: []cons
     const plugin_name = firstPathSegment(include_file);
     if (plugin_name.len == 0) return null;
 
-    const home = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_HOME") catch |home_err| switch (home_err) {
+    const home = sio.getEnvVarOwned(allocator, "SA_PLUGINS_HOME") catch |home_err| switch (home_err) {
         error.EnvironmentVariableNotFound => blk: {
-            const user_home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+            const user_home = sio.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
                 error.EnvironmentVariableNotFound => return null,
                 else => return err,
             };
@@ -191,7 +192,7 @@ pub fn readComposedSource(allocator: std.mem.Allocator, sax_file: []const u8, in
     errdefer allocator.free(source);
     if (includes.len == 0) return source;
 
-    var composed = std.ArrayList(u8).init(allocator);
+    var composed = std.array_list.Managed(u8).init(allocator);
     errdefer composed.deinit();
     try composed.appendSlice(source);
     if (composed.items.len == 0 or composed.items[composed.items.len - 1] != '\n') try composed.append('\n');
@@ -231,12 +232,12 @@ pub fn compileBrowserArtifacts(
         return error.ReactCompileFailed;
     }
 
-    var sa_code = std.ArrayList(u8).init(allocator);
+    var sa_code = std.array_list.Managed(u8).init(allocator);
     errdefer sa_code.deinit();
     const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
     defer allocator.free(reachable_components);
 
-    var shared_sa_code = std.ArrayList(u8).init(allocator);
+    var shared_sa_code = std.array_list.Managed(u8).init(allocator);
     errdefer shared_sa_code.deinit();
 
     var root_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, program.components[0]);
@@ -246,7 +247,7 @@ pub fn compileBrowserArtifacts(
         return err;
     };
 
-    var component_sa_codes = std.ArrayList(std.ArrayList(u8)).init(allocator);
+    var component_sa_codes = std.array_list.Managed(std.array_list.Managed(u8)).init(allocator);
     errdefer {
         for (component_sa_codes.items) |*code| code.deinit();
         component_sa_codes.deinit();
@@ -256,7 +257,7 @@ pub fn compileBrowserArtifacts(
     if (sa_code.items.len != 0 and sa_code.items[sa_code.items.len - 1] != '\n') try sa_code.append('\n');
 
     for (reachable_components, 0..) |component, idx| {
-        var component_code = std.ArrayList(u8).init(allocator);
+        var component_code = std.array_list.Managed(u8).init(allocator);
         errdefer component_code.deinit();
 
         var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
@@ -266,7 +267,7 @@ pub fn compileBrowserArtifacts(
             return err;
         };
 
-        if (idx != 0) try sa_code.writer().writeByte('\n');
+        if (idx != 0) try sa_code.append('\n');
         try appendComponentSansExternBlock(&sa_code, component_code.items);
         if (sa_code.items.len != 0 and sa_code.items[sa_code.items.len - 1] != '\n') try sa_code.append('\n');
         try component_sa_codes.append(component_code);
@@ -295,8 +296,8 @@ pub fn sourceUnitsFromArtifacts(
     allocator: std.mem.Allocator,
     source_path: []const u8,
     artifacts: *const ReactArtifacts,
-) !std.ArrayList(SourceUnit) {
-    var units = std.ArrayList(SourceUnit).init(allocator);
+) !std.array_list.Managed(SourceUnit) {
+    var units = std.array_list.Managed(SourceUnit).init(allocator);
     errdefer {
         for (units.items) |unit| allocator.free(unit.logical_name);
         units.deinit();
@@ -325,7 +326,7 @@ pub fn sourceUnitsFromArtifacts(
     return units;
 }
 
-pub fn freeSourceUnits(allocator: std.mem.Allocator, units: *std.ArrayList(SourceUnit)) void {
+pub fn freeSourceUnits(allocator: std.mem.Allocator, units: *std.array_list.Managed(SourceUnit)) void {
     for (units.items) |unit| allocator.free(unit.logical_name);
     units.deinit();
 }
@@ -368,7 +369,7 @@ test "react vite api resolves includes relative to cwd before plugin installs" {
     try tmp.dir.writeFile(.{ .sub_path = "demos/app.sax", .data = "<Component name=\"App\"><div /></Component>" });
     try tmp.dir.writeFile(.{ .sub_path = "mui/material.sax", .data = "<Component name=\"LocalMui\"><div /></Component>" });
 
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    var old_cwd = try sio.cwd().openDir(".", .{});
     defer old_cwd.close();
     try tmp.dir.setAsCwd();
     defer old_cwd.setAsCwd() catch {};

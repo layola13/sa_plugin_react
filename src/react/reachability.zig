@@ -4,7 +4,7 @@ const parser = @import("parser.zig");
 const Allocator = std.mem.Allocator;
 
 fn addReachableIndex(
-    queue: *std.ArrayList(usize),
+    queue: *std.array_list.Managed(usize),
     seen: *std.AutoHashMap(usize, void),
     index: usize,
 ) !void {
@@ -14,7 +14,7 @@ fn addReachableIndex(
 }
 
 pub fn collectReachableComponents(allocator: Allocator, components: []const parser.Component) ![]parser.Component {
-    var reachable = std.ArrayList(parser.Component).init(allocator);
+    var reachable = std.array_list.Managed(parser.Component).init(allocator);
     errdefer reachable.deinit();
 
     if (components.len == 0) return try reachable.toOwnedSlice();
@@ -25,7 +25,7 @@ pub fn collectReachableComponents(allocator: Allocator, components: []const pars
         if (!by_name.contains(component.name)) try by_name.put(component.name, idx);
     }
 
-    var queue = std.ArrayList(usize).init(allocator);
+    var queue = std.array_list.Managed(usize).init(allocator);
     defer queue.deinit();
 
     var seen = std.AutoHashMap(usize, void).init(allocator);

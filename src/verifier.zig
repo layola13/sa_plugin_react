@@ -258,7 +258,7 @@ fn trapCode(kind: trap.Trap) u32 {
 }
 
 fn trimTrailingCr(text: []const u8) []const u8 {
-    return std.mem.trimRight(u8, text, "\r");
+    return std.mem.trimEnd(u8, text, "\r");
 }
 
 fn copyTextBuf(dest: []u8, text: []const u8) void {
@@ -368,7 +368,7 @@ fn isConstDeclText(text: []const u8) bool {
 fn parseConstDeclName(text: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, text, " \t\r");
     if (!std.mem.startsWith(u8, trimmed, "@const ")) return null;
-    const after = std.mem.trimLeft(u8, trimmed["@const ".len..], " \t\r");
+    const after = std.mem.trimStart(u8, trimmed["@const ".len..], " \t\r");
     const eq = std.mem.indexOfScalar(u8, after, '=') orelse return null;
     const name = std.mem.trim(u8, after[0..eq], " \t\r");
     if (name.len == 0) return null;
@@ -960,8 +960,8 @@ fn trapReport(
         .trap_code = trapCode(kind),
         .line = item.expanded_line + 1,
         .source_line = item.source_line,
-        .source_text_buf = [_]u8{0} ** 256,
-        .original_text_buf = [_]u8{0} ** 256,
+        .source_text_buf = std.mem.zeroes([256]u8),
+        .original_text_buf = std.mem.zeroes([256]u8),
         .source_text = null,
         .original_text = null,
         .register = null,
@@ -971,7 +971,7 @@ fn trapReport(
         .expected_mask_name = if (expected_mask) |v| cap.maskName(v) else null,
         .actual_mask_name = if (actual_mask) |v| cap.maskName(v) else null,
         .upstream_loc = item.upstream_loc,
-        .upstream_file_buf = [_]u8{0} ** 128,
+        .upstream_file_buf = std.mem.zeroes([128]u8),
         .upstream_line = if (item.upstream_loc) |loc| loc.line else 0,
         .upstream_col = if (item.upstream_loc) |loc| loc.col else 0,
         .function = null,
@@ -1032,8 +1032,8 @@ fn saxTrapReport(
         .trap_code = trapCode(kind),
         .line = item.expanded_line + 1,
         .source_line = item.source_line,
-        .source_text_buf = [_]u8{0} ** 256,
-        .original_text_buf = [_]u8{0} ** 256,
+        .source_text_buf = std.mem.zeroes([256]u8),
+        .original_text_buf = std.mem.zeroes([256]u8),
         .source_text = null,
         .original_text = null,
         .register = null,
@@ -1043,7 +1043,7 @@ fn saxTrapReport(
         .expected_mask_name = if (expected_mask) |v| cap.maskName(v) else null,
         .actual_mask_name = if (actual_mask) |v| cap.maskName(v) else null,
         .upstream_loc = item.upstream_loc,
-        .upstream_file_buf = [_]u8{0} ** 128,
+        .upstream_file_buf = std.mem.zeroes([128]u8),
         .upstream_line = if (item.upstream_loc) |loc| loc.line else 0,
         .upstream_col = if (item.upstream_loc) |loc| loc.col else 0,
         .function = null,
@@ -1092,8 +1092,8 @@ fn trapReportFromText(
         .trap_code = trapCode(kind),
         .line = line,
         .source_line = source_line,
-        .source_text_buf = [_]u8{0} ** 256,
-        .original_text_buf = [_]u8{0} ** 256,
+        .source_text_buf = std.mem.zeroes([256]u8),
+        .original_text_buf = std.mem.zeroes([256]u8),
         .source_text = null,
         .original_text = null,
         .register = null,
@@ -1103,7 +1103,7 @@ fn trapReportFromText(
         .expected_mask_name = null,
         .actual_mask_name = null,
         .upstream_loc = null,
-        .upstream_file_buf = [_]u8{0} ** 128,
+        .upstream_file_buf = std.mem.zeroes([128]u8),
         .upstream_line = 0,
         .upstream_col = 0,
         .function = null,
@@ -1534,7 +1534,9 @@ fn collectMetadata(
                     const part_idx = op_idx + 1;
                     if (part_idx >= classified.part_count) break;
                     switch (item.operands[op_idx]) {
-                        .reg => |_| _ = try symbols.intern(classified.parts[part_idx]),
+                        .reg => {
+                            _ = try symbols.intern(classified.parts[part_idx]);
+                        },
                         .text => |text| {
                             if (isIdentLike(text)) _ = try symbols.intern(classified.parts[part_idx]);
                         },
@@ -4313,7 +4315,7 @@ test "early return leak PBT traps when random live allocations survive the fail 
         try source.append('\n');
 
         for (0..extra_count) |idx| {
-            try source.writer().print("leak_{d} = alloc {d}\n", .{ idx, random.intRangeAtMost(u64, 1, 64) });
+            try source.print("leak_{d} = alloc {d}\n", .{ idx, random.intRangeAtMost(u64, 1, 64) });
         }
 
         try source.appendSlice(
