@@ -377,7 +377,7 @@ fn trimText(text: []const u8) []const u8 {
 }
 
 fn stripLeadingSpace(text: []const u8) []const u8 {
-    return std.mem.trimLeft(u8, text, " \t");
+    return std.mem.trimStart(u8, text, " \t");
 }
 
 fn splitLines(text: []const u8) std.mem.SplitIterator(u8, .scalar) {
@@ -550,7 +550,7 @@ fn normalizeAttrName(allocator: std.mem.Allocator, name: []const u8) ![]const u8
 }
 
 fn sanitizeName(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    var out = std.ArrayList(u8).init(allocator);
+    var out = std.array_list.Managed(u8).init(allocator);
     errdefer out.deinit();
 
     for (text, 0..) |c, idx| {
@@ -635,7 +635,7 @@ fn parseTextPieces(allocator: std.mem.Allocator, raw_text: []const u8) ParseErro
     const trimmed = trimText(raw_text);
     if (trimmed.len == 0) return &.{};
 
-    var pieces = std.ArrayList(TextPiece).init(allocator);
+    var pieces = std.array_list.Managed(TextPiece).init(allocator);
     errdefer pieces.deinit();
 
     var cursor: usize = 0;
@@ -671,7 +671,7 @@ fn parseAttrValue(allocator: std.mem.Allocator, text: []const u8) ParseError!Att
     return .{ .literal = try allocator.dupe(u8, trimmed) };
 }
 
-fn appendStyleKey(allocator: std.mem.Allocator, out: *std.ArrayList(u8), key: []const u8) ParseError!void {
+fn appendStyleKey(allocator: std.mem.Allocator, out: *std.array_list.Managed(u8), key: []const u8) ParseError!void {
     _ = allocator;
     if (key.len == 0) return ParseError.InvalidAttribute;
     for (key, 0..) |c, idx| {
@@ -689,18 +689,32 @@ fn appendStyleKey(allocator: std.mem.Allocator, out: *std.ArrayList(u8), key: []
     }
 }
 
+fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var ok = true;
+        for (needle, 0..) |nc, j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(nc)) { ok = false; break; }
+        }
+        if (ok) return i;
+    }
+    return null;
+}
+
 fn isUnsafeStyleValue(value: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(value, "javascript:") != null or
-        std.ascii.indexOfIgnoreCase(value, "expression(") != null;
+    return indexOfIgnoreCase(value, "javascript:") != null or
+        indexOfIgnoreCase(value, "expression(") != null;
 }
 
 fn isUnsafeInnerHtml(value: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(value, "<script") != null or
-        std.ascii.indexOfIgnoreCase(value, "</script") != null or
-        std.ascii.indexOfIgnoreCase(value, "javascript:") != null or
-        std.ascii.indexOfIgnoreCase(value, " onload") != null or
-        std.ascii.indexOfIgnoreCase(value, " onclick") != null or
-        std.ascii.indexOfIgnoreCase(value, " onerror") != null;
+    return indexOfIgnoreCase(value, "<script") != null or
+        indexOfIgnoreCase(value, "</script") != null or
+        indexOfIgnoreCase(value, "javascript:") != null or
+        indexOfIgnoreCase(value, " onload") != null or
+        indexOfIgnoreCase(value, " onclick") != null or
+        indexOfIgnoreCase(value, " onerror") != null;
 }
 
 fn parseDangerouslySetInnerHtmlLiteral(allocator: std.mem.Allocator, text: []const u8) ParseError![]const u8 {
@@ -735,7 +749,7 @@ fn parseDangerouslySetInnerHtmlLiteral(allocator: std.mem.Allocator, text: []con
     return try allocator.dupe(u8, raw);
 }
 
-fn appendJsonString(out: *std.ArrayList(u8), value: []const u8) ParseError!void {
+fn appendJsonString(out: *std.array_list.Managed(u8), value: []const u8) ParseError!void {
     try out.append('"');
     for (value) |c| {
         if (c == '\n') {
@@ -766,7 +780,7 @@ fn skipComponentJsonWhitespace(text: []const u8, pos: *usize) void {
     while (pos.* < text.len and std.ascii.isWhitespace(text[pos.*])) : (pos.* += 1) {}
 }
 
-fn parseComponentJsonString(out: *std.ArrayList(u8), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentJsonString(out: *std.array_list.Managed(u8), text: []const u8, pos: *usize) ParseError!void {
     if (pos.* >= text.len or (text[pos.*] != '"' and text[pos.*] != '\'')) return ParseError.InvalidAttribute;
     const quote = text[pos.*];
     pos.* += 1;
@@ -779,7 +793,7 @@ fn parseComponentJsonString(out: *std.ArrayList(u8), text: []const u8, pos: *usi
     pos.* += 1;
 }
 
-fn parseComponentJsonNumber(out: *std.ArrayList(u8), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentJsonNumber(out: *std.array_list.Managed(u8), text: []const u8, pos: *usize) ParseError!void {
     const value_start = pos.*;
     while (pos.* < text.len) : (pos.* += 1) {
         const c = text[pos.*];
@@ -791,7 +805,7 @@ fn parseComponentJsonNumber(out: *std.ArrayList(u8), text: []const u8, pos: *usi
     try out.appendSlice(value);
 }
 
-fn parseComponentJsonArray(out: *std.ArrayList(u8), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentJsonArray(out: *std.array_list.Managed(u8), text: []const u8, pos: *usize) ParseError!void {
     if (pos.* >= text.len or text[pos.*] != '[') return ParseError.InvalidAttribute;
     pos.* += 1;
     try out.append('[');
@@ -823,7 +837,7 @@ fn parseComponentJsonArray(out: *std.ArrayList(u8), text: []const u8, pos: *usiz
     try out.append(']');
 }
 
-fn parseComponentJsonObjectKey(out: *std.ArrayList(u8), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentJsonObjectKey(out: *std.array_list.Managed(u8), text: []const u8, pos: *usize) ParseError!void {
     if (pos.* >= text.len) return ParseError.InvalidAttribute;
     if (text[pos.*] == '[') {
         pos.* += 1;
@@ -845,7 +859,7 @@ fn parseComponentJsonObjectKey(out: *std.ArrayList(u8), text: []const u8, pos: *
     try appendJsonString(out, text[key_start..pos.*]);
 }
 
-fn parseComponentJsonObject(out: *std.ArrayList(u8), text: []const u8, pos: *usize, comptime has_braces: bool) ParseError!void {
+fn parseComponentJsonObject(out: *std.array_list.Managed(u8), text: []const u8, pos: *usize, comptime has_braces: bool) ParseError!void {
     if (has_braces) {
         if (pos.* >= text.len or text[pos.*] != '{') return ParseError.InvalidAttribute;
         pos.* += 1;
@@ -868,7 +882,7 @@ fn parseComponentJsonObject(out: *std.ArrayList(u8), text: []const u8, pos: *usi
         if (std.mem.startsWith(u8, text[pos.*..], "...")) {
             pos.* += 3;
             skipComponentJsonWhitespace(text, pos);
-            var spread = std.ArrayList(u8).init(out.allocator);
+            var spread = std.array_list.Managed(u8).init(out.allocator);
             defer spread.deinit();
             try parseComponentJsonObject(&spread, text, pos, true);
             if (spread.items.len < 2 or spread.items[0] != '{' or spread.items[spread.items.len - 1] != '}') return ParseError.InvalidAttribute;
@@ -911,7 +925,7 @@ fn parseComponentJsonObject(out: *std.ArrayList(u8), text: []const u8, pos: *usi
     try out.append('}');
 }
 
-fn parseComponentJsonValue(out: *std.ArrayList(u8), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentJsonValue(out: *std.array_list.Managed(u8), text: []const u8, pos: *usize) ParseError!void {
     skipComponentJsonWhitespace(text, pos);
     if (pos.* >= text.len) return ParseError.InvalidAttribute;
     if (text[pos.*] == '"' or text[pos.*] == '\'') {
@@ -948,7 +962,7 @@ fn parseComponentObjectLiteral(allocator: std.mem.Allocator, text: []const u8) P
     const trimmed = trimText(text);
     if (trimmed.len == 0) return ParseError.InvalidAttribute;
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = std.array_list.Managed(u8).init(allocator);
     errdefer out.deinit();
     var pos: usize = 0;
     try parseComponentJsonObject(&out, trimmed, &pos, false);
@@ -957,7 +971,7 @@ fn parseComponentObjectLiteral(allocator: std.mem.Allocator, text: []const u8) P
     return try out.toOwnedSlice();
 }
 
-fn appendTemplateText(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8) ParseError!void {
+fn appendTemplateText(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8) ParseError!void {
     if (text.len == 0) return;
     if (pieces.items.len != 0) {
         switch (pieces.items[pieces.items.len - 1]) {
@@ -972,14 +986,14 @@ fn appendTemplateText(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextP
     try pieces.append(.{ .text = try allocator.dupe(u8, text) });
 }
 
-fn appendTemplateJsonString(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), value: []const u8) ParseError!void {
-    var out = std.ArrayList(u8).init(allocator);
+fn appendTemplateJsonString(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), value: []const u8) ParseError!void {
+    var out = std.array_list.Managed(u8).init(allocator);
     defer out.deinit();
     try appendJsonString(&out, value);
     try appendTemplateText(allocator, pieces, out.items);
 }
 
-fn parseComponentTemplateJsonString(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentTemplateJsonString(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize) ParseError!void {
     if (pos.* >= text.len or (text[pos.*] != '"' and text[pos.*] != '\'')) return ParseError.InvalidAttribute;
     const quote = text[pos.*];
     pos.* += 1;
@@ -992,7 +1006,7 @@ fn parseComponentTemplateJsonString(allocator: std.mem.Allocator, pieces: *std.A
     pos.* += 1;
 }
 
-fn parseComponentTemplateJsonNumber(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentTemplateJsonNumber(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize) ParseError!void {
     const value_start = pos.*;
     while (pos.* < text.len) : (pos.* += 1) {
         const c = text[pos.*];
@@ -1004,7 +1018,7 @@ fn parseComponentTemplateJsonNumber(allocator: std.mem.Allocator, pieces: *std.A
     try appendTemplateText(allocator, pieces, value);
 }
 
-fn parseComponentTemplateJsonExprValue(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentTemplateJsonExprValue(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize) ParseError!void {
     const expr_start = pos.*;
     var quote: u8 = 0;
     var escaped = false;
@@ -1055,7 +1069,7 @@ fn parseComponentTemplateJsonExprValue(allocator: std.mem.Allocator, pieces: *st
     try pieces.append(.{ .interpolation = try parseExpr(allocator, expr_text) });
 }
 
-fn parseComponentTemplateJsonValue(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentTemplateJsonValue(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize) ParseError!void {
     skipComponentJsonWhitespace(text, pos);
     if (pos.* >= text.len) return ParseError.InvalidAttribute;
     if (text[pos.*] == '"' or text[pos.*] == '\'') return parseComponentTemplateJsonString(allocator, pieces, text, pos);
@@ -1082,7 +1096,7 @@ fn parseComponentTemplateJsonValue(allocator: std.mem.Allocator, pieces: *std.Ar
     try parseComponentTemplateJsonNumber(allocator, pieces, text, pos);
 }
 
-fn parseComponentTemplateJsonArray(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentTemplateJsonArray(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize) ParseError!void {
     if (pos.* >= text.len or text[pos.*] != '[') return ParseError.InvalidAttribute;
     pos.* += 1;
     try appendTemplateText(allocator, pieces, "[");
@@ -1112,7 +1126,7 @@ fn parseComponentTemplateJsonArray(allocator: std.mem.Allocator, pieces: *std.Ar
     try appendTemplateText(allocator, pieces, "]");
 }
 
-fn parseComponentTemplateJsonObjectKey(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize) ParseError!void {
+fn parseComponentTemplateJsonObjectKey(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize) ParseError!void {
     if (pos.* >= text.len) return ParseError.InvalidAttribute;
     if (text[pos.*] == '[') {
         pos.* += 1;
@@ -1139,8 +1153,8 @@ fn parseComponentTemplateJsonObjectKey(allocator: std.mem.Allocator, pieces: *st
     try appendTemplateJsonString(allocator, pieces, text[key_start..pos.*]);
 }
 
-fn appendComponentTemplateJsonSpreadLiteral(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize, wrote_any: bool) ParseError!bool {
-    var spread_pieces = std.ArrayList(TextPiece).init(allocator);
+fn appendComponentTemplateJsonSpreadLiteral(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize, wrote_any: bool) ParseError!bool {
+    var spread_pieces = std.array_list.Managed(TextPiece).init(allocator);
     defer spread_pieces.deinit();
     try parseComponentTemplateJsonObject(allocator, &spread_pieces, text, pos, true);
     if (spread_pieces.items.len == 0) return ParseError.InvalidAttribute;
@@ -1239,7 +1253,7 @@ fn parseComponentTemplateJsonSpreadExpr(allocator: std.mem.Allocator, text: []co
     return parseExpr(allocator, expr_text);
 }
 
-fn parseComponentTemplateJsonObject(allocator: std.mem.Allocator, pieces: *std.ArrayList(TextPiece), text: []const u8, pos: *usize, comptime has_braces: bool) ParseError!void {
+fn parseComponentTemplateJsonObject(allocator: std.mem.Allocator, pieces: *std.array_list.Managed(TextPiece), text: []const u8, pos: *usize, comptime has_braces: bool) ParseError!void {
     if (has_braces) {
         if (pos.* >= text.len or text[pos.*] != '{') return ParseError.InvalidAttribute;
         pos.* += 1;
@@ -1304,7 +1318,7 @@ fn parseComponentTemplateJsonObject(allocator: std.mem.Allocator, pieces: *std.A
 fn parseComponentObjectAttrValue(allocator: std.mem.Allocator, text: []const u8) ParseError!AttrValue {
     const trimmed = trimText(text);
     if (trimmed.len == 0) return ParseError.InvalidAttribute;
-    var pieces = std.ArrayList(TextPiece).init(allocator);
+    var pieces = std.array_list.Managed(TextPiece).init(allocator);
     errdefer pieces.deinit();
     var pos: usize = 0;
     try parseComponentTemplateJsonObject(allocator, &pieces, trimmed, &pos, false);
@@ -1321,7 +1335,7 @@ pub fn parseComponentObjectLiteralJson(allocator: std.mem.Allocator, text: []con
     const trimmed = trimText(text);
     if (trimmed.len == 0) return ParseError.InvalidAttribute;
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = std.array_list.Managed(u8).init(allocator);
     errdefer out.deinit();
     var pos: usize = 0;
     try parseComponentJsonObject(&out, trimmed, &pos, true);
@@ -1334,7 +1348,7 @@ fn parseStyleObjectLiteral(allocator: std.mem.Allocator, text: []const u8) Parse
     const trimmed = trimText(text);
     if (trimmed.len == 0) return ParseError.InvalidAttribute;
 
-    var out = std.ArrayList(u8).init(allocator);
+    var out = std.array_list.Managed(u8).init(allocator);
     errdefer out.deinit();
 
     var pos: usize = 0;
@@ -1388,7 +1402,7 @@ fn parseStyleObjectLiteral(allocator: std.mem.Allocator, text: []const u8) Parse
 
 fn parseExpr(allocator: std.mem.Allocator, expr: []const u8) ParseError!Expr {
     const expr_copy = try allocator.dupe(u8, expr);
-    var deps = std.ArrayList([]const u8).init(allocator);
+    var deps = std.array_list.Managed([]const u8).init(allocator);
     errdefer deps.deinit();
 
     var tokens = std.mem.tokenizeAny(u8, expr, " \t\r\n()+-*/,%<>!&|^:=.");
@@ -1422,14 +1436,14 @@ fn hasNativeEscape(text: []const u8) bool {
 const DomBuilder = struct {
     allocator: std.mem.Allocator,
     component_name: []const u8,
-    nodes: std.ArrayList(DomNode),
+    nodes: std.array_list.Managed(DomNode),
     alias_counts: std.StringHashMap(usize),
 
     fn init(allocator: std.mem.Allocator, component_name: []const u8) DomBuilder {
         return .{
             .allocator = allocator,
             .component_name = component_name,
-            .nodes = std.ArrayList(DomNode).init(allocator),
+            .nodes = std.array_list.Managed(DomNode).init(allocator),
             .alias_counts = std.StringHashMap(usize).init(allocator),
         };
     }
@@ -1468,7 +1482,7 @@ const Parser = struct {
         errdefer arena.deinit();
         const a = arena.allocator();
 
-        var components = std.ArrayList(Component).init(a);
+        var components = std.array_list.Managed(Component).init(a);
         errdefer components.deinit();
 
         var pos: usize = 0;
@@ -1495,7 +1509,7 @@ const Parser = struct {
         const name = try self.parseQuotedIdent(allocator, pos);
         try self.expectChar(pos, '>');
 
-        var state_vars = std.ArrayList(StateVar).init(allocator);
+        var state_vars = std.array_list.Managed(StateVar).init(allocator);
         defer state_vars.deinit();
         var state_names = std.StringHashMap(void).init(allocator);
         defer state_names.deinit();
@@ -1503,23 +1517,23 @@ const Parser = struct {
         var dom_builder = DomBuilder.init(allocator, name);
         defer dom_builder.deinit();
 
-        var handlers = std.ArrayList(Handler).init(allocator);
+        var handlers = std.array_list.Managed(Handler).init(allocator);
         defer handlers.deinit();
         var handler_names = std.StringHashMap(void).init(allocator);
         defer handler_names.deinit();
 
-        var lifecycle_hooks = std.ArrayList(LifecycleHook).init(allocator);
+        var lifecycle_hooks = std.array_list.Managed(LifecycleHook).init(allocator);
         defer lifecycle_hooks.deinit();
         var lifecycle_names = std.StringHashMap(void).init(allocator);
         defer lifecycle_names.deinit();
 
-        var route_pages = std.ArrayList(RoutePage).init(allocator);
+        var route_pages = std.array_list.Managed(RoutePage).init(allocator);
         defer route_pages.deinit();
 
-        var release_vars = std.ArrayList([]const u8).init(allocator);
+        var release_vars = std.array_list.Managed([]const u8).init(allocator);
         defer release_vars.deinit();
 
-        var orphan_lines = std.ArrayList(BodyLine).init(allocator);
+        var orphan_lines = std.array_list.Managed(BodyLine).init(allocator);
         defer orphan_lines.deinit();
 
         self.skipWhitespaceAndComments(pos);
@@ -1645,7 +1659,7 @@ const Parser = struct {
         nodes: []const DomNode,
     ) ParseError![]usize {
         _ = self;
-        var roots = std.ArrayList(usize).init(allocator);
+        var roots = std.array_list.Managed(usize).init(allocator);
         defer roots.deinit();
         for (nodes, 0..) |_, idx| {
             var is_child = false;
@@ -1668,7 +1682,7 @@ const Parser = struct {
         self: *Parser,
         allocator: std.mem.Allocator,
         pos: *usize,
-        state_vars: *std.ArrayList(StateVar),
+        state_vars: *std.array_list.Managed(StateVar),
         state_names: *std.StringHashMap(void),
     ) ParseError!void {
         try self.expectString(pos, "<state>");
@@ -1714,7 +1728,7 @@ const Parser = struct {
         }
     }
 
-    fn parseDomChunk(self: *Parser, allocator: std.mem.Allocator, builder: *DomBuilder, route_pages: *std.ArrayList(RoutePage), chunk: []const u8) ParseError!void {
+    fn parseDomChunk(self: *Parser, allocator: std.mem.Allocator, builder: *DomBuilder, route_pages: *std.array_list.Managed(RoutePage), chunk: []const u8) ParseError!void {
         var pos: usize = 0;
         while (pos < chunk.len) {
             self.skipChunkWhitespace(chunk, &pos);
@@ -1731,7 +1745,7 @@ const Parser = struct {
         }
     }
 
-    fn parseDomNode(self: *Parser, allocator: std.mem.Allocator, builder: *DomBuilder, route_pages: *std.ArrayList(RoutePage), chunk: []const u8, pos: *usize) ParseError!usize {
+    fn parseDomNode(self: *Parser, allocator: std.mem.Allocator, builder: *DomBuilder, route_pages: *std.array_list.Managed(RoutePage), chunk: []const u8, pos: *usize) ParseError!usize {
         try self.expectChunkChar(chunk, pos, '<');
         if (pos.* < chunk.len and chunk[pos.*] == '/') return ParseError.InvalidDOMTag;
 
@@ -1750,7 +1764,7 @@ const Parser = struct {
         if (std.mem.eql(u8, tag, "Page")) return ParseError.InvalidPage;
         const alias = if (needsSanitizedAlias(tag)) try sanitizeName(allocator, tag) else try builder.makeAlias(tag);
 
-        var attrs = std.ArrayList(Attribute).init(allocator);
+        var attrs = std.array_list.Managed(Attribute).init(allocator);
         defer attrs.deinit();
         var node_key: ?Expr = null;
 
@@ -1801,7 +1815,7 @@ const Parser = struct {
         });
         const idx = builder.nodes.items.len - 1;
 
-        var children = std.ArrayList(DomChild).init(allocator);
+        var children = std.array_list.Managed(DomChild).init(allocator);
         defer children.deinit();
 
         while (pos.* < chunk.len) {
@@ -1840,7 +1854,7 @@ const Parser = struct {
         return idx;
     }
 
-    fn parseRouterBlock(self: *Parser, allocator: std.mem.Allocator, route_pages: *std.ArrayList(RoutePage), chunk: []const u8, pos: *usize) ParseError!void {
+    fn parseRouterBlock(self: *Parser, allocator: std.mem.Allocator, route_pages: *std.array_list.Managed(RoutePage), chunk: []const u8, pos: *usize) ParseError!void {
         self.skipChunkInlineSpace(chunk, pos);
         if (pos.* < chunk.len and chunk[pos.*] == '/') return ParseError.InvalidRouter;
         if (pos.* >= chunk.len or chunk[pos.*] != '>') return ParseError.InvalidRouter;
@@ -1863,7 +1877,7 @@ const Parser = struct {
         return ParseError.UnexpectedEOF;
     }
 
-    fn parsePageNode(self: *Parser, allocator: std.mem.Allocator, route_pages: *std.ArrayList(RoutePage), chunk: []const u8, pos: *usize) ParseError!void {
+    fn parsePageNode(self: *Parser, allocator: std.mem.Allocator, route_pages: *std.array_list.Managed(RoutePage), chunk: []const u8, pos: *usize) ParseError!void {
         try self.expectChunkChar(chunk, pos, '<');
         const tag = try self.parseChunkIdent(allocator, chunk, pos);
         if (!std.mem.eql(u8, tag, "Page")) return ParseError.InvalidPage;
@@ -2111,7 +2125,7 @@ const Parser = struct {
         };
     }
 
-    fn parseReleaseLines(self: *Parser, allocator: std.mem.Allocator, pos: *usize, out: *std.ArrayList([]const u8)) ParseError!void {
+    fn parseReleaseLines(self: *Parser, allocator: std.mem.Allocator, pos: *usize, out: *std.array_list.Managed([]const u8)) ParseError!void {
         while (pos.* < self.source.len) {
             const line = trimText(self.peekLine(pos));
             if (line.len == 0) {

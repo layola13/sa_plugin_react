@@ -1,4 +1,5 @@
 const std = @import("std");
+const sio = @import("sio");
 const plugin_api = @import("plugin_api");
 const parser = @import("react/parser.zig");
 const lowerer = @import("react/lowerer.zig");
@@ -25,13 +26,13 @@ const skills = [_]plugin_api.SkillSection{
 const SaxArtifacts = struct {
     component_name: []const u8,
     root_name: []u8,
-    sa_code: std.ArrayList(u8),
-    shared_sa_code: ?std.ArrayList(u8),
-    component_sa_codes: ?std.ArrayList(std.ArrayList(u8)),
-    airlock_js: std.ArrayList(u8),
-    wgpu_airlock_js: ?std.ArrayList(u8),
-    sa3d_airlock_js: ?std.ArrayList(u8),
-    index_html: std.ArrayList(u8),
+    sa_code: std.array_list.Managed(u8),
+    shared_sa_code: ?std.array_list.Managed(u8),
+    component_sa_codes: ?std.array_list.Managed(std.array_list.Managed(u8)),
+    airlock_js: std.array_list.Managed(u8),
+    wgpu_airlock_js: ?std.array_list.Managed(u8),
+    sa3d_airlock_js: ?std.array_list.Managed(u8),
+    index_html: std.array_list.Managed(u8),
 
     fn deinit(self: *SaxArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.root_name);
@@ -50,8 +51,8 @@ const SaxArtifacts = struct {
 };
 
 const SidecarSupport = struct {
-    prelude: std.ArrayList(u8),
-    airlock_js: std.ArrayList(u8),
+    prelude: std.array_list.Managed(u8),
+    airlock_js: std.array_list.Managed(u8),
 
     fn deinit(self: *SidecarSupport) void {
         self.prelude.deinit();
@@ -87,13 +88,13 @@ const ReactSourceOptions = struct {
 };
 
 const ShardedSaxArtifacts = struct {
-    shared_sa_code: std.ArrayList(u8),
-    component_sa_codes: std.ArrayList(std.ArrayList(u8)),
-    component_names: std.ArrayList([]const u8),
-    airlock_js: std.ArrayList(u8),
-    wgpu_airlock_js: ?std.ArrayList(u8),
-    sa3d_airlock_js: ?std.ArrayList(u8),
-    index_html: std.ArrayList(u8),
+    shared_sa_code: std.array_list.Managed(u8),
+    component_sa_codes: std.array_list.Managed(std.array_list.Managed(u8)),
+    component_names: std.array_list.Managed([]const u8),
+    airlock_js: std.array_list.Managed(u8),
+    wgpu_airlock_js: ?std.array_list.Managed(u8),
+    sa3d_airlock_js: ?std.array_list.Managed(u8),
+    index_html: std.array_list.Managed(u8),
 
     fn deinit(self: *ShardedSaxArtifacts, allocator: std.mem.Allocator) void {
         self.shared_sa_code.deinit();
@@ -177,7 +178,7 @@ fn isReactCliError(err: anyerror) bool {
     };
 }
 
-fn writeSaxCliError(writer: std.io.AnyWriter, argv: []const []const u8, err: anyerror) !void {
+fn writeSaxCliError(writer: *std.Io.Writer, argv: []const []const u8, err: anyerror) !void {
     const sub = if (argv.len >= 3) argv[2] else "";
     const message = switch (err) {
         error.MissingSourcePath => "missing required React operand",
@@ -233,19 +234,19 @@ fn lowercaseName(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 
 fn ensureParentDir(path: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| {
-        if (dir.len != 0) try std.fs.cwd().makePath(dir);
+        if (dir.len != 0) try sio.cwd().makePath(dir);
     }
 }
 
 fn writeAllFile(path: []const u8, bytes: []const u8) !void {
     try ensureParentDir(path);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    var file = try sio.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(bytes);
 }
 
-fn readSource(allocator: std.mem.Allocator, sax_file: []const u8, stderr: std.io.AnyWriter) ![]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, sax_file, 16 * 1024 * 1024) catch |err| switch (err) {
+fn readSource(allocator: std.mem.Allocator, sax_file: []const u8, stderr: *std.Io.Writer) ![]u8 {
+    return sio.cwd().readFileAlloc(allocator, sax_file, 16 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound,
         error.AccessDenied => return error.AccessDenied,
         error.IsDir => return error.NotDir,
@@ -257,7 +258,7 @@ fn readSource(allocator: std.mem.Allocator, sax_file: []const u8, stderr: std.io
 }
 
 fn firstPathSegment(path: []const u8) []const u8 {
-    const normalized = std.mem.trimLeft(u8, path, "/\\");
+    const normalized = std.mem.trimStart(u8, path, "/\\");
     const slash = std.mem.indexOfAny(u8, normalized, "/\\") orelse normalized.len;
     return normalized[0..slash];
 }
@@ -271,7 +272,7 @@ fn candidateIncludePath(allocator: std.mem.Allocator, base_dir: []const u8, incl
 }
 
 fn findIncludeInPathList(allocator: std.mem.Allocator, env_name: []const u8, include_file: []const u8) !?[]u8 {
-    const value = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+    const value = sio.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         else => return err,
     };
@@ -286,7 +287,7 @@ fn findIncludeInPathList(allocator: std.mem.Allocator, env_name: []const u8, inc
 }
 
 fn findIncludeNearLoadedPlugins(allocator: std.mem.Allocator, include_file: []const u8) !?[]u8 {
-    const value = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
+    const value = sio.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return null,
         else => return err,
     };
@@ -314,9 +315,9 @@ fn findInstalledPluginInclude(allocator: std.mem.Allocator, include_file: []cons
     const plugin_name = firstPathSegment(include_file);
     if (plugin_name.len == 0) return null;
 
-    const home = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_HOME") catch |home_err| switch (home_err) {
+    const home = sio.getEnvVarOwned(allocator, "SA_PLUGINS_HOME") catch |home_err| switch (home_err) {
         error.EnvironmentVariableNotFound => blk: {
-            const user_home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+            const user_home = sio.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
                 error.EnvironmentVariableNotFound => return null,
                 else => return err,
             };
@@ -363,12 +364,12 @@ fn resolveIncludePath(allocator: std.mem.Allocator, sax_file: []const u8, includ
     return std.fs.path.join(allocator, &.{ base_dir, include_file });
 }
 
-fn readComposedSource(allocator: std.mem.Allocator, sax_file: []const u8, includes: []const []const u8, stderr: std.io.AnyWriter) ![]u8 {
+fn readComposedSource(allocator: std.mem.Allocator, sax_file: []const u8, includes: []const []const u8, stderr: *std.Io.Writer) ![]u8 {
     const source = try readSource(allocator, sax_file, stderr);
     errdefer allocator.free(source);
     if (includes.len == 0) return source;
 
-    var composed = std.ArrayList(u8).init(allocator);
+    var composed = std.array_list.Managed(u8).init(allocator);
     errdefer composed.deinit();
     try composed.appendSlice(source);
     if (composed.items.len == 0 or composed.items[composed.items.len - 1] != '\n') try composed.append('\n');
@@ -400,12 +401,12 @@ fn sourceUsesSa3d(source: []const u8) bool {
 }
 
 fn fileExists(path: []const u8) bool {
-    var file = std.fs.cwd().openFile(path, .{}) catch return false;
+    var file = sio.cwd().openFile(path, .{}) catch return false;
     file.close();
     return true;
 }
 
-fn addOwnedCandidate(candidates: *std.ArrayList([]u8), candidate: []u8) !void {
+fn addOwnedCandidate(candidates: *std.array_list.Managed([]u8), candidate: []u8) !void {
     errdefer candidates.allocator.free(candidate);
     for (candidates.items) |existing| {
         if (std.mem.eql(u8, existing, candidate)) {
@@ -416,16 +417,16 @@ fn addOwnedCandidate(candidates: *std.ArrayList([]u8), candidate: []u8) !void {
     try candidates.append(candidate);
 }
 
-fn addEnvDirCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList([]u8), env_name: []const u8) !void {
-    const value = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+fn addEnvDirCandidate(allocator: std.mem.Allocator, candidates: *std.array_list.Managed([]u8), env_name: []const u8) !void {
+    const value = sio.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return,
         else => return err,
     };
     try addOwnedCandidate(candidates, value);
 }
 
-fn addEnvAirlockDirCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList([]u8), env_name: []const u8) !void {
-    const value = std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+fn addEnvAirlockDirCandidate(allocator: std.mem.Allocator, candidates: *std.array_list.Managed([]u8), env_name: []const u8) !void {
+    const value = sio.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return,
         else => return err,
     };
@@ -434,7 +435,7 @@ fn addEnvAirlockDirCandidate(allocator: std.mem.Allocator, candidates: *std.Arra
     try addOwnedCandidate(candidates, try allocator.dupe(u8, dir));
 }
 
-fn addShareDirFromPluginLib(allocator: std.mem.Allocator, candidates: *std.ArrayList([]u8), spec: SidecarSpec, lib_path: []const u8) !void {
+fn addShareDirFromPluginLib(allocator: std.mem.Allocator, candidates: *std.array_list.Managed([]u8), spec: SidecarSpec, lib_path: []const u8) !void {
     const basename = std.fs.path.basename(lib_path);
     if (!std.mem.eql(u8, basename, spec.lib_name) and !std.mem.containsAtLeast(u8, lib_path, 1, spec.path_token)) return;
     const lib_dir = std.fs.path.dirname(lib_path) orelse return;
@@ -443,10 +444,10 @@ fn addShareDirFromPluginLib(allocator: std.mem.Allocator, candidates: *std.Array
     try addOwnedCandidate(candidates, try std.fs.path.join(allocator, &.{ prefix_dir, "share" }));
 }
 
-fn addInstalledShareCandidate(allocator: std.mem.Allocator, candidates: *std.ArrayList([]u8), spec: SidecarSpec) !void {
-    const home = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_HOME") catch |home_err| switch (home_err) {
+fn addInstalledShareCandidate(allocator: std.mem.Allocator, candidates: *std.array_list.Managed([]u8), spec: SidecarSpec) !void {
+    const home = sio.getEnvVarOwned(allocator, "SA_PLUGINS_HOME") catch |home_err| switch (home_err) {
         error.EnvironmentVariableNotFound => blk: {
-            const user_home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+            const user_home = sio.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
                 error.EnvironmentVariableNotFound => return,
                 else => return err,
             };
@@ -459,8 +460,8 @@ fn addInstalledShareCandidate(allocator: std.mem.Allocator, candidates: *std.Arr
     try addOwnedCandidate(candidates, try std.fs.path.join(allocator, &.{ home, "installed", spec.installed_name, "current", "share" }));
 }
 
-fn addPluginPathCandidates(allocator: std.mem.Allocator, candidates: *std.ArrayList([]u8), spec: SidecarSpec) !void {
-    const value = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
+fn addPluginPathCandidates(allocator: std.mem.Allocator, candidates: *std.array_list.Managed([]u8), spec: SidecarSpec) !void {
+    const value = sio.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return,
         else => return err,
     };
@@ -474,7 +475,7 @@ fn addPluginPathCandidates(allocator: std.mem.Allocator, candidates: *std.ArrayL
 }
 
 fn findSidecarShareDir(allocator: std.mem.Allocator, spec: SidecarSpec) !?[]u8 {
-    var candidates = std.ArrayList([]u8).init(allocator);
+    var candidates = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (candidates.items) |candidate| allocator.free(candidate);
         candidates.deinit();
@@ -501,7 +502,7 @@ fn findSidecarShareDir(allocator: std.mem.Allocator, spec: SidecarSpec) !?[]u8 {
     return null;
 }
 
-fn loadSidecarSupport(allocator: std.mem.Allocator, stderr: std.io.AnyWriter, spec: SidecarSpec) !SidecarSupport {
+fn loadSidecarSupport(allocator: std.mem.Allocator, stderr: *std.Io.Writer, spec: SidecarSpec) !SidecarSupport {
     const share_dir = (try findSidecarShareDir(allocator, spec)) orelse {
         try stderr.print("error[{s}]: {s} React source requires sidecar files; install sa_plugin_{s}, set {s}, or include {s} in SA_PLUGINS_PATH\n", .{
             spec.error_tag,
@@ -521,12 +522,12 @@ fn loadSidecarSupport(allocator: std.mem.Allocator, stderr: std.io.AnyWriter, sp
     const airlock_path = try std.fs.path.join(allocator, &.{ share_dir, spec.airlock_file });
     defer allocator.free(airlock_path);
 
-    const sai = try std.fs.cwd().readFileAlloc(allocator, sai_path, 1024 * 1024);
+    const sai = try sio.cwd().readFileAlloc(allocator, sai_path, 1024 * 1024);
     defer allocator.free(sai);
-    const sal = try std.fs.cwd().readFileAlloc(allocator, sal_path, 4 * 1024 * 1024);
+    const sal = try sio.cwd().readFileAlloc(allocator, sal_path, 4 * 1024 * 1024);
     defer allocator.free(sal);
 
-    var prelude = std.ArrayList(u8).init(allocator);
+    var prelude = std.array_list.Managed(u8).init(allocator);
     errdefer prelude.deinit();
     try prelude.appendSlice(sai);
     if (prelude.items.len == 0 or prelude.items[prelude.items.len - 1] != '\n') try prelude.append('\n');
@@ -534,9 +535,9 @@ fn loadSidecarSupport(allocator: std.mem.Allocator, stderr: std.io.AnyWriter, sp
     if (prelude.items.len == 0 or prelude.items[prelude.items.len - 1] != '\n') try prelude.append('\n');
     try prelude.append('\n');
 
-    var airlock_js = std.ArrayList(u8).init(allocator);
+    var airlock_js = std.array_list.Managed(u8).init(allocator);
     errdefer airlock_js.deinit();
-    const airlock_bytes = try std.fs.cwd().readFileAlloc(allocator, airlock_path, 4 * 1024 * 1024);
+    const airlock_bytes = try sio.cwd().readFileAlloc(allocator, airlock_path, 4 * 1024 * 1024);
     defer allocator.free(airlock_bytes);
     try airlock_js.appendSlice(airlock_bytes);
 
@@ -553,7 +554,7 @@ fn parseErrorName(err: parser.ParseError) []const u8 {
     };
 }
 
-fn writeParseError(stderr: std.io.AnyWriter, sax_file: []const u8, err: parser.ParseError) !void {
+fn writeParseError(stderr: *std.Io.Writer, sax_file: []const u8, err: parser.ParseError) !void {
     try stderr.print("error[SA-REACT-CHECK]: {s} while parsing {s}\n", .{ parseErrorName(err), sax_file });
 }
 
@@ -568,7 +569,7 @@ fn validationErrorName(err: ValidationError) []const u8 {
     };
 }
 
-fn writeValidationFailure(stderr: std.io.AnyWriter, failure: ValidationFailure) !void {
+fn writeValidationFailure(stderr: *std.Io.Writer, failure: ValidationFailure) !void {
     try stderr.print("error[SA-REACT-CHECK]: {s} in component {s}", .{
         validationErrorName(failure.err),
         failure.component_name,
@@ -788,7 +789,7 @@ fn compileSaxArtifacts(
     allocator: std.mem.Allocator,
     sax_file: []const u8,
     source: []const u8,
-    stderr: std.io.AnyWriter,
+    stderr: *std.Io.Writer,
 ) !SaxArtifacts {
     var sax_parser = parser.SaxParser.init(allocator, source);
     var program = sax_parser.parse() catch |err| {
@@ -811,12 +812,12 @@ fn compileSaxArtifacts(
 
     const uses_wgpu = sourceUsesWgpu(source);
     const uses_sa3d = sourceUsesSa3d(source);
-    var wgpu_airlock_js: ?std.ArrayList(u8) = null;
+    var wgpu_airlock_js: ?std.array_list.Managed(u8) = null;
     errdefer if (wgpu_airlock_js) |*js| js.deinit();
-    var sa3d_airlock_js: ?std.ArrayList(u8) = null;
+    var sa3d_airlock_js: ?std.array_list.Managed(u8) = null;
     errdefer if (sa3d_airlock_js) |*js| js.deinit();
 
-    var sa_code = std.ArrayList(u8).init(allocator);
+    var sa_code = std.array_list.Managed(u8).init(allocator);
     errdefer sa_code.deinit();
     if (uses_wgpu) {
         var wgpu_support = try loadSidecarSupport(allocator, stderr, wgpu_sidecar);
@@ -840,13 +841,13 @@ fn compileSaxArtifacts(
             try stderr.print("error[SA-REACT-LOWER]: component {s} failed: {s}\n", .{ component.name, @errorName(err) });
             return err;
         };
-        if (idx + 1 < reachable_components.len) try sa_code.writer().writeByte('\n');
+        if (idx + 1 < reachable_components.len) try sa_code.append('\n');
     }
 
     const root_name = try lowercaseName(allocator, program.components[0].name);
     errdefer allocator.free(root_name);
     if (!std.mem.eql(u8, root_name, "app")) {
-        try sa_code.writer().print("@export sax_app_init() -> ptr:\nL_ENTRY:\n  ctx = call @sax_{s}_init()\n  return ctx\n\n", .{root_name});
+        try sa_code.print("@export sax_app_init() -> ptr:\nL_ENTRY:\n  ctx = call @sax_{s}_init()\n  return ctx\n\n", .{root_name});
     }
 
     var airlock_generator = airlock_gen.AirlockGenerator.init(allocator);
@@ -873,7 +874,7 @@ fn compileSaxArtifactsSharded(
     allocator: std.mem.Allocator,
     sax_file: []const u8,
     source: []const u8,
-    stderr: std.io.AnyWriter,
+    stderr: *std.Io.Writer,
 ) !ShardedSaxArtifacts {
     var sax_parser = parser.SaxParser.init(allocator, source);
     var program = sax_parser.parse() catch |err| {
@@ -897,7 +898,7 @@ fn compileSaxArtifactsSharded(
     const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
     defer allocator.free(reachable_components);
 
-    var shared_sa_code = std.ArrayList(u8).init(allocator);
+    var shared_sa_code = std.array_list.Managed(u8).init(allocator);
     errdefer shared_sa_code.deinit();
 
     var root_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, program.components[0]);
@@ -907,20 +908,20 @@ fn compileSaxArtifactsSharded(
         return err;
     };
 
-    var component_sa_codes = std.ArrayList(std.ArrayList(u8)).init(allocator);
+    var component_sa_codes = std.array_list.Managed(std.array_list.Managed(u8)).init(allocator);
     errdefer {
         for (component_sa_codes.items) |*code| code.deinit();
         component_sa_codes.deinit();
     }
 
-    var component_names = std.ArrayList([]const u8).init(allocator);
+    var component_names = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
         for (component_names.items) |name| allocator.free(name);
         component_names.deinit();
     }
 
     for (reachable_components) |component| {
-        var component_code = std.ArrayList(u8).init(allocator);
+        var component_code = std.array_list.Managed(u8).init(allocator);
         errdefer component_code.deinit();
 
         var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
@@ -957,17 +958,20 @@ fn compileSaxArtifactsSharded(
 fn writeCombinedShardedSa(
     path: []const u8,
     shared_sa_code: []const u8,
-    component_sa_codes: []const std.ArrayList(u8),
+    component_sa_codes: []const std.array_list.Managed(u8),
 ) !void {
     try ensureParentDir(path);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    var file = try sio.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
 
     try file.writeAll(shared_sa_code);
     if (shared_sa_code.len != 0 and shared_sa_code[shared_sa_code.len - 1] != '\n') try file.writeAll("\n");
     for (component_sa_codes, 0..) |component_code, idx| {
         if (idx != 0) try file.writeAll("\n");
-        try writeComponentSansExternBlock(file.writer(), component_code.items);
+        var wbuf: [8192]u8 = undefined;
+        var fw = file.writer(&wbuf);
+        try writeComponentSansExternBlock(&fw.interface, component_code.items);
+        try fw.interface.flush();
     }
 }
 
@@ -977,7 +981,7 @@ fn writeComponentSansExternBlock(writer: anytype, text: []const u8) !void {
     while (cursor < text.len) {
         const line_end = std.mem.indexOfScalarPos(u8, text, cursor, '\n') orelse text.len;
         const next_cursor = if (line_end < text.len) line_end + 1 else text.len;
-        const line = std.mem.trimRight(u8, text[cursor..line_end], "\r");
+        const line = std.mem.trimEnd(u8, text[cursor..line_end], "\r");
 
         if (!in_extern_block) {
             if (std.mem.startsWith(u8, line, "@extern ")) {
@@ -1002,8 +1006,8 @@ fn shardedArtifactsToSourceUnits(
     allocator: std.mem.Allocator,
     source_path: []const u8,
     artifacts: *const ShardedSaxArtifacts,
-) !std.ArrayList(sax_build.SourceUnit) {
-    var units = std.ArrayList(sax_build.SourceUnit).init(allocator);
+) !std.array_list.Managed(sax_build.SourceUnit) {
+    var units = std.array_list.Managed(sax_build.SourceUnit).init(allocator);
     errdefer {
         for (units.items) |unit| allocator.free(unit.logical_name);
         units.deinit();
@@ -1037,13 +1041,13 @@ fn verifySaxArtifactsSharded(
     sax_file: []const u8,
     source: []const u8,
     program: *const parser.SaxProgram,
-    stderr: std.io.AnyWriter,
+    stderr: *std.Io.Writer,
 ) !void {
     _ = source;
     const reachable_components = try reachability.collectReachableComponents(allocator, program.components);
     defer allocator.free(reachable_components);
 
-    var shared_sa_code = std.ArrayList(u8).init(allocator);
+    var shared_sa_code = std.array_list.Managed(u8).init(allocator);
     defer shared_sa_code.deinit();
     var root_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, program.components[0]);
     defer root_lowerer.deinit();
@@ -1062,7 +1066,7 @@ fn verifySaxArtifactsSharded(
     }
 
     for (reachable_components, 0..) |component, idx| {
-        var sa_code = std.ArrayList(u8).init(allocator);
+        var sa_code = std.array_list.Managed(u8).init(allocator);
         defer sa_code.deinit();
 
         var sax_lowerer = try lowerer.SaxLowerer.initWithProgram(allocator, reachable_components, component);
@@ -1094,7 +1098,7 @@ fn parseReactSourceOptions(allocator: std.mem.Allocator, argv: []const []const u
 
     const source_file = argv[start];
     var out_dir: ?[]const u8 = null;
-    var includes = std.ArrayList([]const u8).init(allocator);
+    var includes = std.array_list.Managed([]const u8).init(allocator);
     errdefer includes.deinit();
 
     var i = start + 1;
@@ -1126,8 +1130,8 @@ fn executeSaxCheck(
     ctx: *const plugin_api.Context,
     sax_file: []const u8,
     includes: []const []const u8,
-    stdout: std.io.AnyWriter,
-    stderr: std.io.AnyWriter,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
 ) !u8 {
     const source = try readComposedSource(ctx.allocator, sax_file, includes, stderr);
     defer ctx.allocator.free(source);
@@ -1190,8 +1194,8 @@ fn executeSaxBuild(
     sax_file: []const u8,
     includes: []const []const u8,
     out_dir: []const u8,
-    stdout: std.io.AnyWriter,
-    stderr: std.io.AnyWriter,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
 ) !u8 {
     const source = try readComposedSource(ctx.allocator, sax_file, includes, stderr);
     defer ctx.allocator.free(source);
@@ -1287,8 +1291,8 @@ fn executeSaxBuild(
     return 0;
 }
 
-fn executeSaxNew(ctx: *const plugin_api.Context, project_name: []const u8, stdout: std.io.AnyWriter) !u8 {
-    try std.fs.cwd().makePath(project_name);
+fn executeSaxNew(ctx: *const plugin_api.Context, project_name: []const u8, stdout: *std.Io.Writer) !u8 {
+    try sio.cwd().makePath(project_name);
 
     const sax_template =
         \\<Component name="App">
@@ -1357,7 +1361,7 @@ fn executeSaxNew(ctx: *const plugin_api.Context, project_name: []const u8, stdou
     return 0;
 }
 
-fn runSaxCommandImpl(ctx: *const plugin_api.Context, argv: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) anyerror!?u8 {
+fn runSaxCommandImpl(ctx: *const plugin_api.Context, argv: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) anyerror!?u8 {
     if (argv.len < 2) return null;
     if (!std.mem.eql(u8, argv[1], "react")) return null;
     if (argv.len < 3) return error.MissingSourcePath;
@@ -1390,16 +1394,41 @@ fn runSaxCommandImpl(ctx: *const plugin_api.Context, argv: []const []const u8, s
     return error.UnknownCommand;
 }
 
-fn anyWriterFromHostStream(stream: plugin_api.HostStream, storage: *plugin_api.HostStream) std.io.AnyWriter {
-    storage.* = stream;
-    return .{ .context = storage, .writeFn = struct {
-        fn write(ctx: *const anyopaque, bytes: []const u8) anyerror!usize {
-            const hs = @as(*const plugin_api.HostStream, @ptrCast(@alignCast(ctx)));
-            const write_all = hs.write_all orelse return error.WriteFailed;
-            if (write_all(hs.ctx, bytes.ptr, bytes.len) != @intFromEnum(plugin_api.AbiStatus.ok)) return error.WriteFailed;
-            return bytes.len;
+const StreamWriterCtx = struct {
+    stream: plugin_api.HostStream,
+    io_writer: std.Io.Writer = .{ .buffer = &.{}, .end = 0, .vtable = &vtable },
+    storage: [8192]u8 = std.mem.zeroes([8192]u8),
+
+    const vtable: std.Io.Writer.VTable = .{ .drain = drain };
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *StreamWriterCtx = @fieldParentPtr("io_writer", w);
+        const write_all = self.stream.write_all orelse return error.WriteFailed;
+        const ctx = self.stream.ctx;
+        if (w.end != 0) {
+            if (write_all(ctx, w.buffer[0..w.end].ptr, w.end) != @intFromEnum(plugin_api.AbiStatus.ok)) return error.WriteFailed;
+            w.end = 0;
         }
-    }.write };
+        var total: usize = 0;
+        for (data, 0..) |slice, i| {
+            const reps: usize = if (i == data.len - 1) splat else 1;
+            var r: usize = 0;
+            while (r < reps) : (r += 1) {
+                if (slice.len == 0) continue;
+                if (write_all(ctx, slice.ptr, slice.len) != @intFromEnum(plugin_api.AbiStatus.ok)) return error.WriteFailed;
+                total += slice.len;
+            }
+        }
+        return total;
+    }
+};
+
+fn anyWriterFromHostStream(stream: plugin_api.HostStream, storage: *StreamWriterCtx) ?*std.Io.Writer {
+    if (stream.write_all == null or stream.ctx == null) return null;
+    storage.* = .{ .stream = stream };
+    storage.io_writer.buffer = &storage.storage;
+    storage.io_writer.end = 0;
+    return &storage.io_writer;
 }
 
 fn runSaxCommandAbi(ctx: *const plugin_api.Context, argv: [*]const [*:0]const u8, argv_len: usize, stdout: plugin_api.HostStream, stderr: plugin_api.HostStream, out_code: *u8) callconv(.c) u32 {
@@ -1410,17 +1439,21 @@ fn runSaxCommandAbi(ctx: *const plugin_api.Context, argv: [*]const [*:0]const u8
     const args = cArgvToSlice(argv, argv_len, allocator) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     defer allocator.free(args);
 
-    var stdout_storage = stdout;
-    var stderr_storage = stderr;
-    const stdout_writer = anyWriterFromHostStream(stdout, &stdout_storage);
-    const stderr_writer = anyWriterFromHostStream(stderr, &stderr_storage);
+    var stdout_storage: StreamWriterCtx = undefined;
+    var stderr_storage: StreamWriterCtx = undefined;
+    const stdout_writer = anyWriterFromHostStream(stdout, &stdout_storage) orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const stderr_writer = anyWriterFromHostStream(stderr, &stderr_storage) orelse return @intFromEnum(plugin_api.AbiStatus.failed);
 
     const result = runSaxCommandImpl(&local_ctx, args, stdout_writer, stderr_writer) catch |err| {
         if (!isReactCliError(err)) return @intFromEnum(plugin_api.AbiStatus.failed);
         writeSaxCliError(stderr_writer, args, err) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+        stdout_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
+        stderr_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
         out_code.* = reactCliExitCode(err);
         return @intFromEnum(plugin_api.AbiStatus.ok);
     };
+    stdout_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    stderr_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
     if (result) |code| {
         out_code.* = code;
         return @intFromEnum(plugin_api.AbiStatus.ok);
@@ -1446,7 +1479,7 @@ pub export fn saasm_plugin_descriptor_v1_fn(out: *plugin_api.PluginDescriptor) c
 }
 
 const CaptureStream = struct {
-    buffer: *std.ArrayList(u8),
+    buffer: *std.array_list.Managed(u8),
 };
 
 fn captureWriteAll(ctx: ?*anyopaque, bytes: [*]const u8, len: usize) callconv(.c) u32 {
@@ -1467,7 +1500,7 @@ fn dupeZArgs(allocator: std.mem.Allocator, argv: []const []const u8) ![][*:0]con
         for (out[0..copied]) |arg| allocator.free(std.mem.sliceTo(arg, 0));
     }
     for (argv, 0..) |arg, idx| {
-        out[idx] = try allocator.dupeZ(u8, arg);
+        out[idx] = try allocator.dupeSentinel(u8, arg, 0);
         copied += 1;
     }
     return out;
@@ -1478,7 +1511,7 @@ fn freeZArgs(allocator: std.mem.Allocator, argv: [][*:0]const u8) void {
     allocator.free(argv);
 }
 
-fn invokeForTest(argv: []const []const u8, stdout_buffer: *std.ArrayList(u8), stderr_buffer: *std.ArrayList(u8), allocator: std.mem.Allocator) !u8 {
+fn invokeForTest(argv: []const []const u8, stdout_buffer: *std.array_list.Managed(u8), stderr_buffer: *std.array_list.Managed(u8), allocator: std.mem.Allocator) !u8 {
     var ctx = plugin_api.Context{ .allocator = allocator };
     var stdout_ctx = CaptureStream{ .buffer = stdout_buffer };
     var stderr_ctx = CaptureStream{ .buffer = stderr_buffer };
@@ -1512,17 +1545,17 @@ const valid_counter_sax =
 ;
 
 fn expectSaxCheckFailure(source: []const u8, file_name: []const u8, expected_error: []const u8) !void {
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     try writeAllFile(file_name, source);
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const code = try invokeForTest(&.{ "sa", "react", "check", file_name }, &stdout_buf, &stderr_buf, std.testing.allocator);
@@ -1532,9 +1565,9 @@ fn expectSaxCheckFailure(source: []const u8, file_name: []const u8, expected_err
 }
 
 fn expectSaxCliFailure(argv: []const []const u8, expected_code: u8, expected_error: []const u8) !void {
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const code = try invokeForTest(argv, &stdout_buf, &stderr_buf, std.testing.allocator);
@@ -1570,38 +1603,38 @@ test "react plugin abi maps missing source files to io exit code" {
 }
 
 test "react plugin check parses and lowers a real component" {
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     try writeAllFile("counter.sax", valid_counter_sax);
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const code = try invokeForTest(&.{ "sa", "react", "check", "counter.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React check passed"));
     try expectNoNonWhitespaceStderr(stderr_buf.items);
-    try std.testing.expectError(error.FileNotFound, std.fs.cwd().openFile("dist/app.sa", .{}));
+    try std.testing.expectError(error.FileNotFound, sio.cwd().openFile("dist/app.sa", .{}));
 }
 
 test "react plugin build emits frontend artifacts from real sax source" {
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     try writeAllFile("counter.sax", valid_counter_sax);
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const code = try invokeForTest(&.{ "sa", "react", "build", "counter.sax", "--out-dir", "public" }, &stdout_buf, &stderr_buf, std.testing.allocator);
@@ -1610,33 +1643,33 @@ test "react plugin build emits frontend artifacts from real sax source" {
     try std.testing.expect(!std.mem.containsAtLeast(u8, stdout_buf.items, 1, "sax build:"));
     try expectNoNonWhitespaceStderr(stderr_buf.items);
 
-    const sa = try std.fs.cwd().readFileAlloc(std.testing.allocator, "public/app.sa", 2 * 1024 * 1024);
+    const sa = try sio.cwd().readFileAlloc(std.testing.allocator, "public/app.sa", 2 * 1024 * 1024);
     defer std.testing.allocator.free(sa);
     try std.testing.expect(std.mem.containsAtLeast(u8, sa, 1, "@export sax_counter_init()"));
     try std.testing.expect(std.mem.containsAtLeast(u8, sa, 1, "@export sax_app_init()"));
 
-    const airlock = try std.fs.cwd().readFileAlloc(std.testing.allocator, "public/airlock.js", 2 * 1024 * 1024);
+    const airlock = try sio.cwd().readFileAlloc(std.testing.allocator, "public/airlock.js", 2 * 1024 * 1024);
     defer std.testing.allocator.free(airlock);
     try std.testing.expect(std.mem.containsAtLeast(u8, airlock, 1, "export const sax_airlock"));
     try std.testing.expect(std.mem.containsAtLeast(u8, airlock, 1, "const SAX_WGPU_REQUIRED = false;"));
-    try std.testing.expectError(error.FileNotFound, std.fs.cwd().openFile("public/wgpu_airlock.js", .{}));
+    try std.testing.expectError(error.FileNotFound, sio.cwd().openFile("public/wgpu_airlock.js", .{}));
 
-    const html = try std.fs.cwd().readFileAlloc(std.testing.allocator, "public/index.html", 2 * 1024 * 1024);
+    const html = try sio.cwd().readFileAlloc(std.testing.allocator, "public/index.html", 2 * 1024 * 1024);
     defer std.testing.allocator.free(html);
     try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "Content-Security-Policy"));
 
-    const wasm = try std.fs.cwd().readFileAlloc(std.testing.allocator, "public/app.wasm", 1024);
+    const wasm = try sio.cwd().readFileAlloc(std.testing.allocator, "public/app.wasm", 1024);
     defer std.testing.allocator.free(wasm);
     try std.testing.expect(wasm.len > 8);
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00 }, wasm[0..8]);
 }
 
 test "react plugin composes included sax component sources" {
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     const app_source =
@@ -1654,12 +1687,12 @@ test "react plugin composes included sax component sources" {
         \\
     ;
 
-    try std.fs.cwd().makePath("lib");
+    try sio.cwd().makePath("lib");
     try writeAllFile("app.sax", app_source);
     try writeAllFile("lib/components.sax", library_source);
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const check_code = try invokeForTest(&.{ "sa", "react", "check", "app.sax", "--include", "lib/components.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
@@ -1673,18 +1706,18 @@ test "react plugin composes included sax component sources" {
     try std.testing.expectEqual(@as(u8, 0), build_code);
     try expectNoNonWhitespaceStderr(stderr_buf.items);
 
-    const sa = try std.fs.cwd().readFileAlloc(std.testing.allocator, "public/app.sa", 2 * 1024 * 1024);
+    const sa = try sio.cwd().readFileAlloc(std.testing.allocator, "public/app.sa", 2 * 1024 * 1024);
     defer std.testing.allocator.free(sa);
     try std.testing.expect(std.mem.containsAtLeast(u8, sa, 1, "@export sax_app_init()"));
     try std.testing.expect(std.mem.containsAtLeast(u8, sa, 1, "@export sax_librarybutton_init()"));
 }
 
 test "react plugin resolves includes from loaded plugin share dirs" {
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     const app_source =
@@ -1702,17 +1735,17 @@ test "react plugin resolves includes from loaded plugin share dirs" {
         \\
     ;
 
-    try std.fs.cwd().makePath("fake/zig-out/lib");
-    try std.fs.cwd().makePath("fake/zig-out/share/mui");
+    try sio.cwd().makePath("fake/zig-out/lib");
+    try sio.cwd().makePath("fake/zig-out/share/mui");
     try writeAllFile("app.sax", app_source);
     try writeAllFile("fake/zig-out/share/mui/material.sax", library_source);
 
     try std.testing.expectEqual(@as(c_int, 0), setenv("SA_PLUGINS_PATH", "fake/zig-out/lib/libmui.so", 1));
     defer _ = unsetenv("SA_PLUGINS_PATH");
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const check_code = try invokeForTest(&.{ "sa", "react", "check", "app.sax", "--include", "mui/material.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
@@ -1725,14 +1758,14 @@ test "react plugin resolves includes relative to cwd before plugin installs" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("demos");
-    try tmp.dir.makePath("mui");
-    try tmp.dir.writeFile(.{ .sub_path = "demos/app.sax", .data = "<Component name=\"App\"><div /></Component>" });
-    try tmp.dir.writeFile(.{ .sub_path = "mui/material.sax", .data = "<Component name=\"LocalMui\"><div /></Component>" });
+    try tmp.dir.createDirPath(sio.io(), "demos");
+    try tmp.dir.createDirPath(sio.io(), "mui");
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "demos/app.sax", .data = "<Component name=\"App\"><div /></Component>" });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "mui/material.sax", .data = "<Component name=\"LocalMui\"><div /></Component>" });
 
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    var old_cwd = try sio.cwd().openDir(".", .{});
     defer old_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer old_cwd.setAsCwd() catch {};
 
     const path = try resolveIncludePath(std.testing.allocator, "demos/app.sax", "mui/material.sax");
@@ -1802,16 +1835,16 @@ test "react plugin check accepts negated logical object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "negated_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "negated_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "negated_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -1840,16 +1873,16 @@ test "react plugin check accepts logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "logical_or_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -1878,16 +1911,16 @@ test "react plugin check accepts negated logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "negated_logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "negated_logical_or_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "negated_logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -1917,16 +1950,16 @@ test "react plugin check accepts nested dynamic object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nested_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "nested_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "nested_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -1959,16 +1992,16 @@ test "react plugin check accepts nested ptr ternary object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nested_ptr_ternary_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "nested_ptr_ternary_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "nested_ptr_ternary_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -1999,16 +2032,16 @@ test "react plugin check accepts nested logical or ptr object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "nested_logical_or_ptr_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "nested_logical_or_ptr_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "nested_logical_or_ptr_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2038,16 +2071,16 @@ test "react plugin check accepts array item dynamic object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2077,16 +2110,16 @@ test "react plugin check accepts leading array item dynamic object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2115,16 +2148,16 @@ test "react plugin check accepts leading array item conditional object spreads" 
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_conditional_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_conditional_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_conditional_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2153,16 +2186,16 @@ test "react plugin check accepts leading array item ternary null branch object s
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_ternary_null_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_ternary_null_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_ternary_null_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2191,16 +2224,16 @@ test "react plugin check accepts leading array item logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "leading_array_item_logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "leading_array_item_logical_or_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "leading_array_item_logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2229,16 +2262,16 @@ test "react plugin check accepts array item conditional object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_conditional_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_conditional_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_conditional_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2267,16 +2300,16 @@ test "react plugin check accepts array item ternary null branch object spreads" 
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_ternary_null_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_ternary_null_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_ternary_null_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2305,16 +2338,16 @@ test "react plugin check accepts array item logical or object spreads" {
     ;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "array_item_logical_or_spread.sax", .data = valid_source });
+    try tmp.dir.writeFile(sio.io(), .{ .sub_path = "array_item_logical_or_spread.sax", .data = valid_source });
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     const code = try invokeForTest(&.{ "sa", "react", "check", "array_item_logical_or_spread.sax" }, &stdout_buf, &stderr_buf, std.testing.allocator);
     try std.testing.expectEqual(@as(u8, 0), code);
@@ -2390,16 +2423,16 @@ test "react plugin check rejects DOM attrs outside the whitelist" {
 }
 
 test "react plugin new creates a usable project scaffold" {
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const code = try invokeForTest(&.{ "sa", "react", "new", "demo" }, &stdout_buf, &stderr_buf, std.testing.allocator);
@@ -2407,11 +2440,11 @@ test "react plugin new creates a usable project scaffold" {
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buf.items, 1, "React project created"));
     try expectNoNonWhitespaceStderr(stderr_buf.items);
 
-    const app = try std.fs.cwd().readFileAlloc(std.testing.allocator, "demo/app.sax", 1024 * 1024);
+    const app = try sio.cwd().readFileAlloc(std.testing.allocator, "demo/app.sax", 1024 * 1024);
     defer std.testing.allocator.free(app);
     try std.testing.expect(std.mem.containsAtLeast(u8, app, 1, "<Component name=\"App\">"));
 
-    const package_json = try std.fs.cwd().readFileAlloc(std.testing.allocator, "demo/package.json", 1024 * 1024);
+    const package_json = try sio.cwd().readFileAlloc(std.testing.allocator, "demo/package.json", 1024 * 1024);
     defer std.testing.allocator.free(package_json);
     try std.testing.expect(std.mem.containsAtLeast(u8, package_json, 1, "\"build\": \"sa react build app.sax\""));
 }

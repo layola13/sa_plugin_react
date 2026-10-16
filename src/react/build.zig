@@ -1,10 +1,11 @@
 const std = @import("std");
+const sio = @import("sio");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 fn writeTestWasm(path: []const u8) !void {
     try ensureParentDir(path);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    var file = try sio.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll("\x00asm\x01\x00\x00\x00\x00\x09\x08sax-test");
 }
@@ -12,7 +13,7 @@ fn writeTestWasm(path: []const u8) !void {
 fn runLlvmAs(allocator: std.mem.Allocator, ll_path: []const u8, artifact_path: []const u8) !void {
     const tools = [_][]const u8{ "llvm-as-14", "llvm-as" };
     for (tools) |tool| {
-        const result = std.process.Child.run(.{
+        const result = sio.Child.run(.{
             .allocator = allocator,
             .argv = &.{ tool, ll_path, "-o", artifact_path },
         }) catch |err| switch (err) {
@@ -23,7 +24,7 @@ fn runLlvmAs(allocator: std.mem.Allocator, ll_path: []const u8, artifact_path: [
         defer allocator.free(result.stderr);
 
         switch (result.term) {
-            .Exited => |code| if (code == 0) return,
+            .exited => |code| if (code == 0) return,
             else => {},
         }
         return error.ChildProcessFailed;
@@ -34,7 +35,7 @@ fn runLlvmAs(allocator: std.mem.Allocator, ll_path: []const u8, artifact_path: [
 fn writeTestBitcode(allocator: std.mem.Allocator, artifact_path: []const u8) !void {
     const ll_path = try std.fmt.allocPrint(allocator, "{s}.ll", .{artifact_path});
     defer allocator.free(ll_path);
-    defer std.fs.cwd().deleteFile(ll_path) catch {};
+    defer sio.cwd().deleteFile(ll_path) catch {};
 
     try writeAllFile(ll_path,
         \\target triple = "wasm32-unknown-unknown"
@@ -75,10 +76,10 @@ const TestDriver = struct {
         optimization: Optimization,
         debug: bool,
     ) !WasmArgv {
-        var argv = std.ArrayList([]const u8).init(allocator);
+        var argv = std.array_list.Managed([]const u8).init(allocator);
         errdefer argv.deinit();
 
-        var owned_args = std.ArrayList([]const u8).init(allocator);
+        var owned_args = std.array_list.Managed([]const u8).init(allocator);
         errdefer {
             for (owned_args.items) |arg| allocator.free(arg);
             owned_args.deinit();
@@ -270,7 +271,7 @@ pub const CompileResult = if (builtin.is_test) union(enum) { ok: CompileOk, trap
 };
 
 fn projectRootFromSourcePath(allocator: std.mem.Allocator, source_path: []const u8) ![]u8 {
-    const cwd_abs = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const cwd_abs = try sio.cwd().realpathAlloc(allocator, ".");
     errdefer allocator.free(cwd_abs);
 
     const source_dir = std.fs.path.dirname(source_path) orelse ".";
@@ -287,10 +288,10 @@ fn projectRootFromSourcePath(allocator: std.mem.Allocator, source_path: []const 
         const manifest_path = try std.fs.path.join(allocator, &.{ candidate_dir, "sa.mod" });
         defer allocator.free(manifest_path);
 
-        if (std.fs.cwd().openFile(manifest_path, .{})) |file| {
+        if (sio.cwd().openFile(manifest_path, .{})) |file| {
             file.close();
             allocator.free(cwd_abs);
-            return try std.fs.cwd().realpathAlloc(allocator, candidate_dir);
+            return try sio.cwd().realpathAlloc(allocator, candidate_dir);
         } else |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
@@ -307,7 +308,7 @@ fn projectRootFromSourcePath(allocator: std.mem.Allocator, source_path: []const 
 }
 
 fn stdRootFromEnv(allocator: std.mem.Allocator) ![]u8 {
-    const env_root = std.process.getEnvVarOwned(allocator, "SA_STD_DIR") catch |err| switch (err) {
+    const env_root = sio.getEnvVarOwned(allocator, "SA_STD_DIR") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         else => return err,
     };
@@ -327,7 +328,7 @@ fn readProjectManifest(allocator: std.mem.Allocator, source_path: []const u8) !?
     const manifest_path = try std.fs.path.join(allocator, &.{ project_root, "sa.mod" });
     defer allocator.free(manifest_path);
 
-    const file = std.fs.cwd().openFile(manifest_path, .{}) catch |err| switch (err) {
+    const file = sio.cwd().openFile(manifest_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -340,7 +341,7 @@ fn readProjectManifest(allocator: std.mem.Allocator, source_path: []const u8) !?
 
 fn manifestDependencies(manifest_file: *const manifest.Manifest, allocator: std.mem.Allocator) ![]pkg_resolver.Dependency {
     if (builtin.is_test) return &.{};
-    var deps = std.ArrayList(pkg_resolver.Dependency).init(allocator);
+    var deps = std.array_list.Managed(pkg_resolver.Dependency).init(allocator);
     errdefer deps.deinit();
 
     for (manifest_file.requires) |entry| {
@@ -361,7 +362,7 @@ fn lineAt(source: []const u8, target_line: u32) ?[]const u8 {
 }
 
 fn sourceExcerpt(line: []const u8) []const u8 {
-    return std.mem.trimRight(u8, line, "\r");
+    return std.mem.trimEnd(u8, line, "\r");
 }
 
 fn copyTextBuf(dest: []u8, text: []const u8) void {
@@ -380,7 +381,7 @@ fn sourceStem(path: []const u8) []const u8 {
 }
 
 fn dupeWasmExports(allocator: std.mem.Allocator, source_text: []const u8) ![]const []const u8 {
-    var exports = std.ArrayList([]const u8).init(allocator);
+    var exports = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
         for (exports.items) |name| allocator.free(name);
         exports.deinit();
@@ -388,12 +389,12 @@ fn dupeWasmExports(allocator: std.mem.Allocator, source_text: []const u8) ![]con
 
     var lines = std.mem.splitScalar(u8, source_text, '\n');
     while (lines.next()) |line| {
-        const trimmed = std.mem.trimRight(u8, line, "\r");
+        const trimmed = std.mem.trimEnd(u8, line, "\r");
         if (!std.mem.startsWith(u8, trimmed, "@export ")) continue;
 
-        const rest = std.mem.trimLeft(u8, trimmed["@export ".len..], " \t");
+        const rest = std.mem.trimStart(u8, trimmed["@export ".len..], " \t");
         const open = std.mem.indexOfScalar(u8, rest, '(') orelse continue;
-        const name = std.mem.trimRight(u8, rest[0..open], " \t");
+        const name = std.mem.trimEnd(u8, rest[0..open], " \t");
         if (name.len == 0) continue;
 
         const export_name = try allocator.dupe(u8, name);
@@ -405,7 +406,7 @@ fn dupeWasmExports(allocator: std.mem.Allocator, source_text: []const u8) ![]con
 }
 
 fn dupeWasmExportsFromSourceUnits(allocator: std.mem.Allocator, units: []const SourceUnit) ![]const []const u8 {
-    var exports = std.ArrayList([]const u8).init(allocator);
+    var exports = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
         for (exports.items) |name| allocator.free(name);
         exports.deinit();
@@ -468,8 +469,8 @@ fn trapFromFlattenError(source: []const u8, err: anyerror, last_line: ?u32) if (
         .trap_code = trap.trapCode(.forbidden_syntax),
         .line = line_no,
         .source_line = line_no,
-        .source_text_buf = [_]u8{0} ** 256,
-        .original_text_buf = [_]u8{0} ** 256,
+        .source_text_buf = std.mem.zeroes([256]u8),
+        .original_text_buf = std.mem.zeroes([256]u8),
         .source_text = null,
         .original_text = null,
         .register = null,
@@ -479,10 +480,10 @@ fn trapFromFlattenError(source: []const u8, err: anyerror, last_line: ?u32) if (
         .expected_mask_name = null,
         .actual_mask_name = null,
         .upstream_loc = null,
-        .upstream_file_buf = [_]u8{0} ** 128,
+        .upstream_file_buf = std.mem.zeroes([128]u8),
         .upstream_line = 0,
         .upstream_col = 0,
-        .function_buf = [_]u8{0} ** 64,
+        .function_buf = std.mem.zeroes([64]u8),
         .function = null,
         .is_ffi_wrapper = null,
         .message = @errorName(err),
@@ -580,7 +581,7 @@ pub fn buildBrowserWasmFromSourceText(
         return 1;
     };
     var hash_hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+    _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.bytesToHex(hash, .lower)}) catch unreachable;
 
     const project_root = projectRootFromSourcePath(allocator, source_path) catch |err| {
         try stderr.print("error[SAX-CACHE-ROOT]: failed to find project root: {s}\n", .{@errorName(err)});
@@ -624,11 +625,11 @@ pub fn buildBrowserWasmFromSourceText(
         return 0;
     }
 
-    const start_time = std.time.milliTimestamp();
+    const start_time = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
     var compile_bc_ms: i64 = 0;
     var compile_obj_ms: i64 = 0;
 
-    const compiled_start = std.time.milliTimestamp();
+    const compiled_start = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
     const compiled = try compileSourceText(allocator, source_path, source_text, options);
     switch (compiled) {
         .trap => |report| {
@@ -638,16 +639,16 @@ pub fn buildBrowserWasmFromSourceText(
         .ok => |ok| {
             var owned = ok;
             defer owned.deinit(allocator);
-            compile_bc_ms += std.time.milliTimestamp() - compiled_start;
+            compile_bc_ms += @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - compiled_start;
 
             const stable_hash = try getBrowserWasmIncrementalCacheKey(allocator, debug, optimization, options.dce, exports, std_root);
             var stable_hash_hex: [64]u8 = undefined;
-            _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&stable_hash)}) catch unreachable;
+            _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.bytesToHex(stable_hash, .lower)}) catch unreachable;
 
             const fn_cache_dir = try std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-browser-wasm-incremental", &stable_hash_hex });
             defer allocator.free(fn_cache_dir);
 
-            var bitcode_paths = std.ArrayList([]const u8).init(allocator);
+            var bitcode_paths = std.array_list.Managed([]const u8).init(allocator);
             defer {
                 for (bitcode_paths.items) |p| allocator.free(p);
                 bitcode_paths.deinit();
@@ -681,7 +682,7 @@ pub fn buildBrowserWasmFromSourceText(
                             errdefer allocator.free(func_o_path);
 
                             if (!filePresentNonEmpty(func_bc_path)) {
-                                const bc_start = std.time.milliTimestamp();
+                                const bc_start = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
                                 try ensureParentDir(func_bc_path);
                                 const opt_level = switch (optimization) {
                                     .release_small => @as(u8, 1),
@@ -706,11 +707,11 @@ pub fn buildBrowserWasmFromSourceText(
                                     },
                                     func_bc_path,
                                 );
-                                compile_bc_ms += std.time.milliTimestamp() - bc_start;
+                                compile_bc_ms += @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - bc_start;
                             }
 
                             if (!filePresentNonEmpty(func_o_path)) {
-                                const obj_start = std.time.milliTimestamp();
+                                const obj_start = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
                                 try ensureParentDir(func_o_path);
                                 try driver.compileWasmObj(
                                     allocator,
@@ -721,7 +722,7 @@ pub fn buildBrowserWasmFromSourceText(
                                     debug,
                                     stderr,
                                 );
-                                compile_obj_ms += std.time.milliTimestamp() - obj_start;
+                                compile_obj_ms += @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - obj_start;
                             }
 
                             try bitcode_paths.append(func_o_path);
@@ -740,7 +741,7 @@ pub fn buildBrowserWasmFromSourceText(
             }
 
             try ensureParentDir(artifact_path);
-            const link_start = std.time.milliTimestamp();
+            const link_start = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
             driver.compileWasm(
                 allocator,
                 bitcode_paths.items,
@@ -753,23 +754,23 @@ pub fn buildBrowserWasmFromSourceText(
                 error.ChildProcessFailed => return 1,
                 else => return err,
             };
-            const link_ms = std.time.milliTimestamp() - link_start;
-            const total_time = std.time.milliTimestamp() - start_time;
+            const link_ms = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - link_start;
+            const total_time = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - start_time;
             try stderr.print("  [vite] browser wasm generated in {d}ms (lowering/emission: {d}ms, object compilation: {d}ms, link: {d}ms)\n", .{ total_time, compile_bc_ms, compile_obj_ms, link_ms });
 
             if (std.fs.path.dirname(cached_wasm)) |dir| {
-                if (dir.len != 0) std.fs.cwd().makePath(dir) catch {};
+                if (dir.len != 0) sio.cwd().makePath(dir) catch {};
             }
-            std.fs.cwd().copyFile(out_path, std.fs.cwd(), cached_wasm, .{}) catch {};
-            std.fs.cwd().copyFile(bitcode_paths.items[0], std.fs.cwd(), cached_bc, .{}) catch {};
+            sio.cwd().copyFile(out_path, sio.cwd(), cached_wasm, .{}) catch {};
+            sio.cwd().copyFile(bitcode_paths.items[0], sio.cwd(), cached_bc, .{}) catch {};
 
             const cached_manifest = std.fs.path.join(allocator, &.{ cache_dir, "manifest.json" }) catch null;
             if (cached_manifest) |man_path| {
                 defer allocator.free(man_path);
-                var manifest_file = std.fs.cwd().createFile(man_path, .{}) catch null;
+                var manifest_file = sio.cwd().createFile(man_path, .{}) catch null;
                 if (manifest_file) |*f| {
                     defer f.close();
-                    f.writer().print(
+                    f.print(
                         \\{{
                         \\  "version": 1,
                         \\  "debug": {},
@@ -836,7 +837,7 @@ fn computeSourceUnitObjectKey(
     hasher.update(unit.source_text);
     var out: [32]u8 = undefined;
     hasher.final(&out);
-    return try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&out)});
+    return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(out, .lower)});
 }
 
 pub fn buildBrowserWasmFromSourceUnits(
@@ -872,7 +873,7 @@ pub fn buildBrowserWasmFromSourceUnits(
         return 1;
     };
     var hash_hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch unreachable;
+    _ = std.fmt.bufPrint(&hash_hex, "{s}", .{std.fmt.bytesToHex(hash, .lower)}) catch unreachable;
 
     const project_root = projectRootFromSourcePath(allocator, units[0].source_path) catch |err| {
         try stderr.print("error[SAX-CACHE-ROOT]: failed to find project root: {s}\n", .{@errorName(err)});
@@ -901,18 +902,18 @@ pub fn buildBrowserWasmFromSourceUnits(
         return 0;
     }
 
-    const start_time = std.time.milliTimestamp();
+    const start_time = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
     var compile_bc_ms: i64 = 0;
     var compile_obj_ms: i64 = 0;
 
     const stable_hash = try getBrowserWasmIncrementalCacheKey(allocator, debug, optimization, options.dce, exports, std_root);
     var stable_hash_hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.fmtSliceHexLower(&stable_hash)}) catch unreachable;
+    _ = std.fmt.bufPrint(&stable_hash_hex, "{s}", .{std.fmt.bytesToHex(stable_hash, .lower)}) catch unreachable;
 
     const unit_cache_dir = try std.fs.path.join(allocator, &.{ project_root, ".sa_cache", "vite-browser-wasm-source-units", &stable_hash_hex });
     defer allocator.free(unit_cache_dir);
 
-    var bitcode_paths = std.ArrayList([]const u8).init(allocator);
+    var bitcode_paths = std.array_list.Managed([]const u8).init(allocator);
     defer {
         for (bitcode_paths.items) |p| allocator.free(p);
         bitcode_paths.deinit();
@@ -935,7 +936,7 @@ pub fn buildBrowserWasmFromSourceUnits(
         errdefer allocator.free(unit_o_path);
 
         if (!filePresentNonEmpty(unit_bc_path)) {
-            const bc_start = std.time.milliTimestamp();
+            const bc_start = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
             const compiled = try compileSourceText(allocator, unit.source_path, unit.source_text, .{ .jobs = 1, .dce = options.dce });
             switch (compiled) {
                 .trap => |report| {
@@ -961,11 +962,11 @@ pub fn buildBrowserWasmFromSourceUnits(
                     );
                 },
             }
-            compile_bc_ms += std.time.milliTimestamp() - bc_start;
+            compile_bc_ms += @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - bc_start;
         }
 
         if (!filePresentNonEmpty(unit_o_path)) {
-            const obj_start = std.time.milliTimestamp();
+            const obj_start = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
             try ensureParentDir(unit_o_path);
             try driver.compileWasmObj(
                 allocator,
@@ -976,7 +977,7 @@ pub fn buildBrowserWasmFromSourceUnits(
                 debug,
                 stderr,
             );
-            compile_obj_ms += std.time.milliTimestamp() - obj_start;
+            compile_obj_ms += @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - obj_start;
         }
 
         try bitcode_paths.append(unit_o_path);
@@ -984,7 +985,7 @@ pub fn buildBrowserWasmFromSourceUnits(
     }
 
     try ensureParentDir(out_path);
-    const link_start = std.time.milliTimestamp();
+    const link_start = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000)));
     driver.compileWasm(
         allocator,
         bitcode_paths.items,
@@ -997,14 +998,14 @@ pub fn buildBrowserWasmFromSourceUnits(
         error.ChildProcessFailed => return 1,
         else => return err,
     };
-    const link_ms = std.time.milliTimestamp() - link_start;
-    const total_time = std.time.milliTimestamp() - start_time;
+    const link_ms = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - link_start;
+    const total_time = @as(i64, @intCast(@divFloor(sio.nanoTimestamp(), 1000000))) - start_time;
     try stderr.print("  [vite] browser wasm generated in {d}ms (lowering/emission: {d}ms, object compilation: {d}ms, link: {d}ms)\n", .{ total_time, compile_bc_ms, compile_obj_ms, link_ms });
 
     if (std.fs.path.dirname(cached_wasm)) |dir| {
-        if (dir.len != 0) std.fs.cwd().makePath(dir) catch {};
+        if (dir.len != 0) sio.cwd().makePath(dir) catch {};
     }
-    std.fs.cwd().copyFile(out_path, std.fs.cwd(), cached_wasm, .{}) catch {};
+    sio.cwd().copyFile(out_path, sio.cwd(), cached_wasm, .{}) catch {};
     return 0;
 }
 
@@ -1081,7 +1082,7 @@ fn computeFunctionObjectKey(
     }
     var out: [32]u8 = undefined;
     hasher.final(&out);
-    return try std.fmt.allocPrint(allocator, "{}", .{std.fmt.fmtSliceHexLower(&out)});
+    return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(out, .lower)});
 }
 
 fn getBrowserWasmCacheKey(
@@ -1138,9 +1139,9 @@ fn hashFileContentIfPresent(allocator: std.mem.Allocator, hasher: *std.crypto.ha
     hashNormalizedPath(hasher, path);
     hasher.update(&[_]u8{0});
     var file = if (std.fs.path.isAbsolute(path))
-        std.fs.openFileAbsolute(path, .{}) catch return
+        sio.openFileAbsolute(path, .{}) catch return
     else
-        std.fs.cwd().openFile(path, .{}) catch return;
+        sio.cwd().openFile(path, .{}) catch return;
     defer file.close();
     const bytes = try file.readToEndAlloc(allocator, 128 * 1024 * 1024);
     defer allocator.free(bytes);
@@ -1152,7 +1153,7 @@ fn hashRuntimeBuildInputs(allocator: std.mem.Allocator, hasher: *std.crypto.hash
     if (@hasDecl(build_options, "sa_bin")) {
         try hashFileContentIfPresent(allocator, hasher, build_options.sa_bin);
     }
-    const plugin_path = std.process.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
+    const plugin_path = sio.getEnvVarOwned(allocator, "SA_PLUGINS_PATH") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return,
         else => return err,
     };
@@ -1167,13 +1168,13 @@ fn hashRuntimeBuildInputs(allocator: std.mem.Allocator, hasher: *std.crypto.hash
 }
 
 fn hashSaStdTree(allocator: std.mem.Allocator, hasher: *std.crypto.hash.sha2.Sha256, std_root: []const u8) !void {
-    var entries = std.ArrayList([]u8).init(allocator);
+    var entries = std.array_list.Managed([]u8).init(allocator);
     defer {
         for (entries.items) |entry| allocator.free(entry);
         entries.deinit();
     }
 
-    var root = try std.fs.cwd().openDir(std_root, .{ .iterate = true });
+    var root = try sio.cwd().openDir(std_root, .{ .iterate = true });
     defer root.close();
 
     var walker = try root.walk(allocator);
@@ -1203,26 +1204,26 @@ fn hashSaStdTree(allocator: std.mem.Allocator, hasher: *std.crypto.hash.sha2.Sha
 }
 
 fn filePresentNonEmpty(path: []const u8) bool {
-    const stat = std.fs.cwd().statFile(path) catch return false;
+    const stat = sio.cwd().statFile(path) catch return false;
     return stat.kind == .file and stat.size != 0;
 }
 
 fn copyFile(src: []const u8, dst: []const u8) !void {
     if (std.fs.path.dirname(dst)) |dir| {
-        if (dir.len != 0) try std.fs.cwd().makePath(dir);
+        if (dir.len != 0) try sio.cwd().makePath(dir);
     }
-    try std.fs.cwd().copyFile(src, std.fs.cwd(), dst, .{});
+    try sio.cwd().copyFile(src, sio.cwd(), dst, .{});
 }
 
 fn ensureParentDir(path: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| {
-        if (dir.len != 0) try std.fs.cwd().makePath(dir);
+        if (dir.len != 0) try sio.cwd().makePath(dir);
     }
 }
 
 fn writeAllFile(path: []const u8, bytes: []const u8) !void {
     try ensureParentDir(path);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    var file = try sio.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(bytes);
 }
@@ -1264,9 +1265,9 @@ test "sax test llvm emitter writes real bitcode" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    var old_cwd = try sio.cwd().openDir(".", .{});
     defer old_cwd.close();
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer old_cwd.setAsCwd() catch {};
 
     try emit_llvm_llvmc.emitLlvmcToFile(
@@ -1280,14 +1281,14 @@ test "sax test llvm emitter writes real bitcode" {
         "app.wasm.sa.bc",
     );
 
-    const bytes = try std.fs.cwd().readFileAlloc(std.testing.allocator, "app.wasm.sa.bc", 1024 * 1024);
+    const bytes = try sio.cwd().readFileAlloc(std.testing.allocator, "app.wasm.sa.bc", 1024 * 1024);
     defer std.testing.allocator.free(bytes);
     try std.testing.expect(bytes.len > 4);
     try std.testing.expectEqualSlices(u8, &.{ 'B', 'C', 0xc0, 0xde }, bytes[0..4]);
 
     const tools = [_][]const u8{ "llvm-dis-14", "llvm-dis" };
     for (tools) |tool| {
-        const result = std.process.Child.run(.{
+        const result = sio.Child.run(.{
             .allocator = std.testing.allocator,
             .argv = &.{ tool, "app.wasm.sa.bc", "-o", "-" },
         }) catch |err| switch (err) {
@@ -1298,7 +1299,7 @@ test "sax test llvm emitter writes real bitcode" {
         defer std.testing.allocator.free(result.stderr);
 
         switch (result.term) {
-            .Exited => |code| {
+            .exited => |code| {
                 try std.testing.expectEqual(@as(u8, 0), code);
                 try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "define void @__sax_test()"));
                 return;
