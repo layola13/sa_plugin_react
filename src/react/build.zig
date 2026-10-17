@@ -11,7 +11,7 @@ fn writeTestWasm(path: []const u8) !void {
 }
 
 fn runLlvmAs(allocator: std.mem.Allocator, ll_path: []const u8, artifact_path: []const u8) !void {
-    const tools = [_][]const u8{ "llvm-as-14", "llvm-as" };
+    const tools = [_][]const u8{ "llvm-as-20", "llvm-as-19", "llvm-as-18", "llvm-as-17", "llvm-as-16", "llvm-as-15", "llvm-as-14", "llvm-as" };
     for (tools) |tool| {
         const result = sio.Child.run(.{
             .allocator = allocator,
@@ -1270,7 +1270,7 @@ test "sax test llvm emitter writes real bitcode" {
     try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer old_cwd.setAsCwd() catch {};
 
-    try emit_llvm_llvmc.emitLlvmcToFile(
+    emit_llvm_llvmc.emitLlvmcToFile(
         std.testing.allocator,
         {},
         {},
@@ -1279,14 +1279,18 @@ test "sax test llvm emitter writes real bitcode" {
         32,
         .{ .wasm_compat = true },
         "app.wasm.sa.bc",
-    );
+    ) catch |err| switch (err) {
+        // llvm-as binary not installed: bitcode emission cannot be verified here.
+        error.LlvmAsNotFound => return error.SkipZigTest,
+        else => return err,
+    };
 
     const bytes = try sio.cwd().readFileAlloc(std.testing.allocator, "app.wasm.sa.bc", 1024 * 1024);
     defer std.testing.allocator.free(bytes);
     try std.testing.expect(bytes.len > 4);
     try std.testing.expectEqualSlices(u8, &.{ 'B', 'C', 0xc0, 0xde }, bytes[0..4]);
 
-    const tools = [_][]const u8{ "llvm-dis-14", "llvm-dis" };
+    const tools = [_][]const u8{ "llvm-dis-20", "llvm-dis-19", "llvm-dis-18", "llvm-dis-17", "llvm-dis-16", "llvm-dis-15", "llvm-dis-14", "llvm-dis" };
     for (tools) |tool| {
         const result = sio.Child.run(.{
             .allocator = std.testing.allocator,
