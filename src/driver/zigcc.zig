@@ -132,7 +132,9 @@ pub fn argvForWasm(
         owned_args.deinit();
     }
 
-    try argv.appendSlice(&.{ "zig", "build-exe" });
+    const zig_exe = sio.resolveHostExe(allocator, "zig") catch null;
+    if (zig_exe) |p| try owned_args.append(p);
+    try argv.appendSlice(&.{ zig_exe orelse "zig", "build-exe" });
     for (artifact_paths) |p| try argv.append(p);
     if (debug) {
         try argv.append("-g");
@@ -343,7 +345,9 @@ pub fn argvForWasmObj(
         owned_args.deinit();
     }
 
-    try argv.appendSlice(&.{ "zig", "build-obj", artifact_path });
+    const zig_exe = sio.resolveHostExe(allocator, "zig") catch null;
+    if (zig_exe) |p| try owned_args.append(p);
+    try argv.appendSlice(&.{ zig_exe orelse "zig", "build-obj", artifact_path });
     if (debug) {
         try argv.append("-g");
     }

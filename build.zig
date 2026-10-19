@@ -9,11 +9,12 @@ fn pathFromRoot(b: *std.Build, sub_path: []const u8) []u8 {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const sa_repo_root = b.option([]const u8, "sa-repo-root", "SA repository root used to resolve sa_std imports.") orelse "/home/vscode/projects/sci";
+    const sa_repo_root_opt = b.option([]const u8, "sa-repo-root", "SA repository root used to resolve sa_std imports.") orelse "../sci";
+    const sa_repo_root = if (std.fs.path.isAbsolute(sa_repo_root_opt)) sa_repo_root_opt else pathFromRoot(b, sa_repo_root_opt);
     const sa_bin = b.option([]const u8, "sa-bin", "Path to the SA host binary used for React integration tests.") orelse b.pathJoin(&.{ sa_repo_root, "zig-out/bin/sa" });
-    const llvm_include_dir = b.option([]const u8, "llvm-include-dir", "LLVM C API include directory.") orelse "/usr/lib/llvm-14/include";
-    const llvm_lib_dir = b.option([]const u8, "llvm-lib-dir", "LLVM library directory.") orelse "/usr/lib/llvm-14/lib";
-    const llvm_lib_name = b.option([]const u8, "llvm-lib-name", "LLVM system library name.") orelse "LLVM-14";
+    const llvm_include_dir = b.option([]const u8, "llvm-include-dir", "LLVM C API include directory.") orelse "/usr/lib/llvm-20/include";
+    const llvm_lib_dir = b.option([]const u8, "llvm-lib-dir", "LLVM library directory.") orelse "/usr/lib/llvm-20/lib";
+    const llvm_lib_name = b.option([]const u8, "llvm-lib-name", "LLVM system library name.") orelse "LLVM-20";
     // NOTE(Zig 0.17): sci-style `-Dllvm` bootstrap switch. When false, link the
     // stub (same C ABI, returns "backend disabled" at runtime) instead of LLVM.
     const enable_llvm = b.option(bool, "llvm", "Link the LLVM-C backend (needs LLVM dev headers/lib). Use -Dllvm=false for bootstrap.") orelse true;
