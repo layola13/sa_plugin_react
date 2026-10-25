@@ -1,6 +1,5 @@
 {
-  "name": "sa-plugin-react-tools",
-  "private": true,
+  "name": "sa-plugin-react",
   "type": "module",
   "scripts": {
     "verify:browser": "node tools/verify_react_browser.mjs",
@@ -11,5 +10,28 @@
     "playwright": "1.53.1",
     "react": "19.1.0",
     "react-dom": "19.1.0"
+  },
+  "version": "0.1.0",
+  "description": "SA plugin: react. The plugin manifest is sap.json; install with: sa plugin install npm:sa-plugin-react@0.1.0",
+  "keywords": [
+    "sa-plugin",
+    "sa",
+    "sla"
+  ],
+  "files": [
+    "sap.json",
+    "build.zig",
+    "build.zig.zon",
+    "src",
+    "sa",
+    "*.sai",
+    "*.sal",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "tools"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
